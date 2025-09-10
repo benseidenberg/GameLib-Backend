@@ -1,0 +1,12 @@
+FastAPI
+supabase
+uvicorn
+pydantic
+python-dotenv
+# AI/ML libraries for chatbot and recommender
+openai
+transformers
+scikit-learn
+pandas
+numpy
+joblib
