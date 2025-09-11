@@ -2,12 +2,13 @@ from pydantic import BaseModel
 from typing import Optional
 
 class UserCreate(BaseModel):
-    email: str
-    password: str
+    steam_id: int
+    data: Optional[dict] = None
 
 class UserResponse(BaseModel):
-    id: int
-    email: str
+    steam_id : int
+    data: Optional[dict] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True
+
