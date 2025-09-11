@@ -2,7 +2,8 @@ FastAPI
 supabase
 uvicorn
 pydantic
-python-dotenv
+python3-dotenv
+python3-openid
 # AI/ML libraries for chatbot and recommender
 openai
 transformers
