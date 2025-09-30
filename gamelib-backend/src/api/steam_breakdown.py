@@ -17,7 +17,8 @@ async def fetch_steam_profile(steam_id: int):
             remove = [col for col in df.columns if col not in ["appid", "playtime_forever", "rtime_last_played"]]
             df = df.drop(columns=remove)
             df = df[df["playtime_forever"] > 0]
-            df["rtime_last_played"] = df["rtime_last_played"].apply(lambda x: datetime.datetime.fromtimestamp(x).strftime("%Y-%m-%d") if pd.notnull(x) else None)
+            if "rtime_last_played" in df.columns:
+                df["rtime_last_played"] = df["rtime_last_played"].apply(lambda x: datetime.datetime.fromtimestamp(x).strftime("%Y-%m-%d") if pd.notnull(x) else None)
             df = df.set_index("appid").to_dict(orient="index")
 
             return (data, df)
