@@ -4,9 +4,12 @@
 *.env.production
 
 # Python
-__pycache__/
+*.pyc
+*.pyo
 *.py[cod]
 *$py.class
+__pycache__/
+gamelib-backend/src/**/__pycache__/
 *.so
 .Python
 build/
