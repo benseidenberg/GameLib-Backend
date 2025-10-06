@@ -25,3 +25,67 @@ async def fetch_steam_profile(steam_id: int):
         else:
             raise ValueError(f"Failed to fetch Steam profile: {response.status_code}")
     return None
+
+async def fetch_steam_player_summary(steam_id: int):
+    """
+    Fetch Steam user profile information using GetPlayerSummaries API
+    This gets the user's name, avatar, profile URL, etc.
+    """
+    import httpx
+    try:
+        async with httpx.AsyncClient() as client:
+            url = f"http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/"
+            params = {
+                'key': STEAM_API_KEY,
+                'steamids': str(steam_id)
+            }
+            
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            
+            data = response.json()
+            players = data.get('response', {}).get('players', [])
+            
+            if players:
+                player_data = players[0]
+                print(f"Fetched Steam player summary: {player_data}")
+                return player_data  # Returns player data with personaname, profileurl, avatarfull, etc.
+            else:
+                print(f"No player data found for steam_id: {steam_id}")
+                return None
+                
+    except Exception as e:
+        print(f"Error fetching Steam player summary: {e}")
+        return None
+
+async def fetch_steam_player_summary(steam_id: int):
+    """
+    Fetch Steam user profile information using GetPlayerSummaries API
+    This gets the user's name, avatar, profile URL, etc.
+    """
+    import httpx
+    try:
+        async with httpx.AsyncClient() as client:
+            url = f"http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/"
+            params = {
+                'key': STEAM_API_KEY,
+                'steamids': str(steam_id)
+            }
+            
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            
+            data = response.json()
+            players = data.get('response', {}).get('players', [])
+            
+            if players:
+                player_data = players[0]
+                print(f"Fetched Steam player summary: {player_data}")
+                return player_data  # Returns player data with personaname, profileurl, avatarfull, etc.
+            else:
+                print(f"No player data found for steam_id: {steam_id}")
+                return None
+                
+    except Exception as e:
+        print(f"Error fetching Steam player summary: {e}")
+        return None

@@ -4,7 +4,7 @@ from src.db.supabase_client import supabase
 from src.schemas.user_schema import UserCreate, UserResponse
 from postgrest.exceptions import APIError
 from src.schemas.user_schema import UserCreate
-from src.api.steam_breakdown import fetch_steam_profile
+from src.api.steam_breakdown import fetch_steam_profile, fetch_steam_player_summary
 import asyncio
 
 STEAM_API_KEY="968317D323A2D4C8ED61E3D9F5E2FAB1"
@@ -32,19 +32,25 @@ async def user_login(steam_id: int):
     print(f"User login attempt for steam_id: {steam_id}")
     # Check if user already exists
     response = supabase.table('users').select('*').eq('steam_id', steam_id).execute()
-    #print(f"Existing user check response: {response}")
     
     if response.data:
-        #print(f"User exists, current data: {response.data[0]}")
         # User already exists, update Steam data and increment login_count
         return await update_user_data(steam_id)
-    # Create new user with steam_id and Steam data
     else:
         print("Creating new user")
-        data, df = await fetch_steam_profile(steam_id)
-        user_create = UserCreate(steam_id=steam_id, data=data, games=df, login_count=1)
+        
+        # Fetch both games data and player profile
+        games_data, df = await fetch_steam_profile(steam_id)
+        player_profile = await fetch_steam_player_summary(steam_id)
+        
+        if not player_profile:
+            raise Exception("Could not fetch Steam player profile")
+        
+        # Store the player profile data (which includes personaname)
+        user_create = UserCreate(steam_id=steam_id, data=player_profile, login_count=1)
         print(f"Creating user with data: {user_create}")
         created = await create_user(user_create)
+        
         # Fetch and return the created user
         response = supabase.table('users').select('*').eq('steam_id', steam_id).execute()
         if response.data:
@@ -65,14 +71,17 @@ async def get_user_data(steam_id: int):
 
 async def update_user_data(steam_id: int):
     try:
-        # Fetch fresh Steam data
-        print(f"Fetching Steam profile for steam_id: {steam_id}")
-        data, df = await fetch_steam_profile(steam_id)
-        #print(f"Fetched Steam data: {data}")
+        # Fetch fresh Steam player profile data
+        print(f"Fetching Steam player profile for steam_id: {steam_id}")
+        player_profile = await fetch_steam_player_summary(steam_id)
+        
+        if not player_profile:
+            raise Exception("Could not fetch Steam player profile")
+        
+        print(f"Fetched Steam player profile: {player_profile}")
         
         # Get current user to increment login_count
         current_user_response = supabase.table('users').select('login_count').eq('steam_id', steam_id).execute()
-        #print(f"Current user response: {current_user_response}")
         
         current_login_count = 1  # Default for new users
         if current_user_response.data and len(current_user_response.data) > 0:
@@ -82,10 +91,9 @@ async def update_user_data(steam_id: int):
         else:
             print(f"No existing user found, using default login_count: {current_login_count}")
         
-        # Update database with fresh data and incremented login_count
+        # Update database with fresh player profile data and incremented login_count
         update_payload = {
-            'data': data,
-            'games': df,
+            'data': player_profile,
             'login_count': current_login_count
         }
         print(f"Update payload: {update_payload}")
@@ -197,4 +205,51 @@ async def delete_user(steam_id: int):
     except APIError as e:
         raise HTTPException(status_code=400, detail=e.message)
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/users/{steam_id}/name")
+async def get_user_name(steam_id: int):
+    """
+    Get just the user's Steam name - simplified endpoint for frontend
+    If user doesn't exist in database, triggers login process to create them
+    """
+    try:
+        print(f"get_user_name called for steam_id: {steam_id}")
+        
+        # First try to get from database
+        user_data = await get_user_data(steam_id)
+        print(f"User data from database: {user_data}")
+        
+        if user_data:
+            # User exists in database, get name from stored data
+            steam_data = user_data.get('data', {})
+            player_name = steam_data.get('personaname', 'Unknown Player')
+            print(f"Found user in database, player_name: {player_name}")
+            return {"name": player_name}
+        else:
+            # User doesn't exist in database, trigger login process to create them
+            print(f"User {steam_id} not found in database, creating user via login process")
+            
+            try:
+                login_result = await user_login(steam_id)
+                print(f"Login result: {login_result}")
+                
+                if login_result:
+                    # User was successfully created/updated, get name from database result
+                    steam_data = login_result.get('data', {})
+                    player_name = steam_data.get('personaname', 'Unknown Player')
+                    print(f"Created user successfully, player_name: {player_name}")
+                    return {"name": player_name}
+                else:
+                    print("Login result was None")
+                    raise HTTPException(status_code=500, detail="Failed to create user - login returned None")
+                    
+            except Exception as login_error:
+                print(f"Error during user_login: {login_error}")
+                raise HTTPException(status_code=500, detail=f"Failed to create user: {str(login_error)}")
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in get_user_name: {e}")
         raise HTTPException(status_code=500, detail=str(e))
