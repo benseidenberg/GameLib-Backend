@@ -3,11 +3,9 @@ from fastapi import APIRouter, HTTPException
 from src.db.supabase_client import supabase
 from src.schemas.user_schema import UserCreate, UserResponse
 from postgrest.exceptions import APIError
-from src.schemas.user_schema import UserCreate
 from src.api.steam_breakdown import fetch_steam_profile, fetch_steam_player_summary
 import asyncio
 
-STEAM_API_KEY="968317D323A2D4C8ED61E3D9F5E2FAB1"
 router = APIRouter()
 
 

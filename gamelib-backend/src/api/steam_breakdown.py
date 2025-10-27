@@ -1,4 +1,12 @@
-STEAM_API_KEY="968317D323A2D4C8ED61E3D9F5E2FAB1"
+import requests
+import pandas as pd
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+STEAM_API_KEY = os.getenv("STEAM_API_KEY")
+if not STEAM_API_KEY:
+    raise ValueError("STEAM_API_KEY environment variable is required")
 import pandas as pd
 import json
 import datetime
