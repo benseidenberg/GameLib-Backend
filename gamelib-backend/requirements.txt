@@ -4,7 +4,6 @@ uvicorn
 pydantic
 python-dotenv
 python3-openid
-httpx
 # AI/ML libraries for chatbot and recommender
 openai
 transformers
