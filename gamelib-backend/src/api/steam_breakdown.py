@@ -57,4 +57,3 @@ async def fetch_steam_player_summary(steam_id: int):
     except Exception as e:
         print(f"Error fetching Steam player summary: {e}")
         return None
-
