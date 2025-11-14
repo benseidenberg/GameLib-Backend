@@ -1,11 +1,21 @@
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import os
+from pathlib import Path
 
-load_dotenv()
+# Get the directory where this file is located
+current_dir = Path(__file__).resolve().parent
+# Go up to src directory and load .env from there
+env_path = current_dir.parent / '.env'
+load_dotenv(dotenv_path=env_path)
+
 url = os.getenv("SUPABASE_URL")
 key = os.getenv("SUPABASE_KEY")
-assert url is not None and key is not None, "SUPABASE_URL and SUPABASE_KEY must be set"
+if url is None:
+    raise ValueError("SUPABASE_URL environment variable is required")
+if key is None:
+    raise ValueError("SUPABASE_KEY environment variable is required")
+#assert url is not None and key is not None, "SUPABASE_URL and SUPABASE_KEY must be set"
 supabase: Client = create_client(url, key)
 
 def get_user(user_id: str):

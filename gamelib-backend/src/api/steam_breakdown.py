@@ -18,9 +18,18 @@ async def fetch_steam_profile(steam_id: int):
         if response.status_code == 200:
             data = response.json()
 
+            # Check if user has any games
+            if "response" not in data or "games" not in data["response"]:
+                # User has no games or empty library
+                return (data, {})
+            
+            games = data["response"]["games"]
+            if not games or len(games) == 0:
+                # Empty games list
+                return (data, {})
+            
             #print("Fetched Steam profile data:", data)
-            #if "response" in data and "players" in data["response"] and len(data["response"]["players"]) > 0:
-            df = pd.json_normalize(data["response"]["games"])
+            df = pd.json_normalize(games)
             remove = [col for col in df.columns if col not in ["appid", "playtime_forever", "rtime_last_played"]]
             df = df.drop(columns=remove)
             df = df[df["playtime_forever"] > 0]

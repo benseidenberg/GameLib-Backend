@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.api import users
 from src.api.auth import router as auth_router
 from src.api.recommendations import router as recommendations_router
+from src.api.c_filtering import router as c_filtering_router
 
 app = FastAPI()
 
@@ -18,6 +19,7 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/api")
 app.include_router(users.router, prefix="/api")
 app.include_router(recommendations_router, prefix="/api")
+app.include_router(c_filtering_router, prefix="/api")
 
 @app.get("/")
 def read_root():
