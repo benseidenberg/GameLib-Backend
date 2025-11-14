@@ -25,7 +25,7 @@ async def get_game_clusters(steam_id: int):
 async def get_collaborative_recommendations(
     steam_id: int, 
     top_n_games: int = 5,
-    min_playtime: int = 60,
+    min_playtime: int = 600,
     max_similar_users: int = 10,
     max_recommendations: int = 20
 ) -> Dict:
@@ -208,5 +208,4 @@ async def get_collaborative_recommendations(
         }
 
 
-#https://api.steampowered.com/IStoreAppSimilarityService/IdentifyClustersFromPlaytime/v1/?access_token=eyAidHlwIjogIkpXVCIsICJhbGciOiAiRWREU0EiIH0.eyAiaXNzIjogInI6MDAwMl8yNkZDQzNFRl9ENTEyNSIsICJzdWIiOiAiNzY1NjExOTg5ODA2NjA2MjciLCAiYXVkIjogWyAid2ViOmNvbW11bml0eSIgXSwgImV4cCI6IDE3NTkyNjAxMDEsICJuYmYiOiAxNzUwNTMyNjM0LCAiaWF0IjogMTc1OTE3MjYzNCwgImp0aSI6ICIwMDE5XzI2RkNDM0U0XzkxMzVGIiwgIm9hdCI6IDE3NTkxNzI2MzQsICJydF9leHAiOiAxNzc3MTI4MTA2LCAicGVyIjogMCwgImlwX3N1YmplY3QiOiAiMTQwLjIzMi4xNzcuMTQ2IiwgImlwX2NvbmZpcm1lciI6ICIxNDAuMjMyLjE2My4yOCIgfQ.Ob602cgjEiiOESorPFGJg9DPfsdFCI8_7m5-uti9ipT9EYxnMmqyjvVqhIZ5KQPgLVXuzreGdE4ZD-wHkbVuCg&steamid=76561198980660627
 

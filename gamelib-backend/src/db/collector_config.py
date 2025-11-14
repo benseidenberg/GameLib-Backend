@@ -4,8 +4,8 @@ Adjust these settings to control the data collection process.
 """
 
 # Collection Targets
-TARGET_USERS = 500  # How many users to collect
-MAX_ATTEMPTS = 5000  # Maximum attempts before stopping
+TARGET_USERS = 1000  # How many users to collect
+MAX_ATTEMPTS = 10000  # Maximum attempts before stopping
 
 # Validation Requirements
 MIN_GAMES_REQUIRED = 5  # Minimum games a user must have

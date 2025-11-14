@@ -3,6 +3,7 @@ from src.recommender.recommender import get_game_clusters
 import os
 import httpx
 import asyncio
+import random
 
 # Get Steam API key from environment variables (loaded in main.py)
 STEAM_API_KEY = os.getenv("STEAM_API_KEY")
@@ -325,9 +326,9 @@ async def test_recommendations(steam_id: int):
                     total = cluster.get('playtime_forever', 0)
                     print(f"  Cluster {cluster.get('cluster_id')}: score={score:.1f}, recent={recent}min, total={total}min")
                 
-                # Take from the most relevant clusters
-                for cluster in sorted_clusters[:5]:  # Check top 5 clusters
-                    if len(app_ids_with_source) >= 3:
+                # Take from the most relevant clusters - ONE game per cluster for variety
+                for cluster in sorted_clusters[:10]:  # Check top 10 clusters to ensure we get 5 games
+                    if len(app_ids_with_source) >= 5:
                         break
                         
                     cluster_id = cluster.get('cluster_id')
@@ -337,48 +338,53 @@ async def test_recommendations(steam_id: int):
                     similar_apps = cluster.get('similar_items_appids', [])
                     played_apps = cluster.get('played_appids', [])
                     
+                    # Shuffle similar games to get variety on each request
+                    if similar_apps:
+                        similar_apps = list(similar_apps)  # Make a copy
+                        random.shuffle(similar_apps)
+                    
                     print(f"DEBUG: Found {len(played_apps)} played apps and {len(similar_apps)} similar apps")
                     print(f"DEBUG: Played games in this cluster: {played_apps}")
                     print(f"DEBUG: Similar games available: {similar_apps[:8]}")  # Show first 8
                     
-                    # For each cluster, we'll pick the most played game as the "source"
-                    # and recommend similar games based on it
-                    if played_apps:
-                        # Choose the first played game as the primary source for this cluster
-                        source_app_id = played_apps[0]  # Could be improved to pick by playtime
+                    # For each cluster, we'll pick one played game as the "source"
+                    # and recommend ONE similar game based on it
+                    if played_apps and similar_apps:
+                        # Shuffle played apps too to vary which game is used as source
+                        played_apps_list = list(played_apps)
+                        random.shuffle(played_apps_list)
+                        source_app_id = played_apps_list[0]
                         
                         # Fetch source game details
                         source_game_info = await get_steam_app_details_basic(source_app_id)
                         
                         if source_game_info:
-                            # Add similar games with this source
-                            for app_id in similar_apps[:8]:  # Try more games per cluster
-                                if len(app_ids_with_source) < 3:
-                                    # Check if we already have this app_id
-                                    existing_app_ids = [item[0] for item in app_ids_with_source]
-                                    if app_id not in existing_app_ids:
-                                        app_ids_with_source.append((app_id, source_game_info))
-                                        print(f"DEBUG: Added similar app_id: {app_id} based on {source_game_info['title']}")
-                                else:
-                                    break
+                            # Add ONE similar game from this cluster for variety
+                            for app_id in similar_apps:
+                                # Check if we already have this app_id
+                                existing_app_ids = [item[0] for item in app_ids_with_source]
+                                if app_id not in existing_app_ids:
+                                    app_ids_with_source.append((app_id, source_game_info))
+                                    print(f"DEBUG: Added similar app_id: {app_id} based on {source_game_info['title']}")
+                                    break  # Only take ONE game per cluster
         
         print(f"DEBUG: Final app_ids with sources: {[(item[0], item[1]['title']) for item in app_ids_with_source]}")
         
         # If we don't have enough games from clusters, add some popular games as fallback
-        if len(app_ids_with_source) < 3:
+        if len(app_ids_with_source) < 5:
             print(f"DEBUG: Only got {len(app_ids_with_source)} games from clusters, adding fallback games")
             fallback_games = [570, 440, 730]  # Dota 2, TF2, CS:GO
             
             for app_id in fallback_games:
-                if len(app_ids_with_source) >= 3:
+                if len(app_ids_with_source) >= 5:
                     break
                 # Add fallback games without a specific source
                 existing_app_ids = [item[0] for item in app_ids_with_source]
                 if app_id not in existing_app_ids:
                     app_ids_with_source.append((app_id, {"title": "Popular games", "app_id": None}))
         
-        # Limit to 3 games
-        app_ids_with_source = app_ids_with_source[:3]
+        # Limit to 5 games
+        app_ids_with_source = app_ids_with_source[:5]
         print(f"DEBUG: Final app_ids to fetch: {[item[0] for item in app_ids_with_source]}")
         
         # Fetch game details for each app ID with content filtering
@@ -395,7 +401,7 @@ async def test_recommendations(steam_id: int):
                 games_data.append(game_info)
         
         # If we don't have enough games after filtering, try to get more from additional clusters
-        if len(games_data) < 3 and clusters_data:
+        if len(games_data) < 5 and clusters_data:
             print(f"DEBUG: Only got {len(games_data)} appropriate games, fetching more...")
             response_data = clusters_data.get('response', {})
             clusters_list = response_data.get('clusters', [])
@@ -412,19 +418,26 @@ async def test_recommendations(steam_id: int):
             
             # Try more clusters if available
             for cluster in sorted_clusters[5:15]:  # Try clusters 6-15
-                if len(games_data) >= 3:
+                if len(games_data) >= 5:
                     break
                 
                 played_apps = cluster.get('played_appids', [])
                 similar_apps = cluster.get('similar_items_appids', [])
                 
+                # Shuffle to get variety
+                if similar_apps:
+                    similar_apps = list(similar_apps)
+                    random.shuffle(similar_apps)
+                
                 if played_apps:
-                    source_app_id = played_apps[0]
+                    played_apps_list = list(played_apps)
+                    random.shuffle(played_apps_list)
+                    source_app_id = played_apps_list[0]
                     source_game_info = await get_steam_app_details_basic(source_app_id)
                     
                     if source_game_info:
                         for app_id in similar_apps[:5]:  # Try more games per cluster
-                            if len(games_data) >= 3:
+                            if len(games_data) >= 5:
                                 break
                             
                             # Check if we already have this game
@@ -439,10 +452,10 @@ async def test_recommendations(steam_id: int):
                                     games_data.append(game_info)
         
         # Final fallback to safe, popular games if still not enough
-        if len(games_data) < 3:
+        if len(games_data) < 5:
             safe_fallback_games = [570, 440, 730, 359550, 271590]  # Dota 2, TF2, CS:GO, Rainbow Six, GTA V
             for app_id in safe_fallback_games:
-                if len(games_data) >= 3:
+                if len(games_data) >= 5:
                     break
                 
                 existing_app_ids = [game['app_id'] for game in games_data]
