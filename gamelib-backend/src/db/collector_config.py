@@ -4,17 +4,17 @@ Adjust these settings to control the data collection process.
 """
 
 # Collection Targets
-TARGET_USERS = 1000  # How many users to collect
-MAX_ATTEMPTS = 10000  # Maximum attempts before stopping
+TARGET_USERS = 10000  # How many users to collect
+MAX_ATTEMPTS = 100000  # Maximum attempts before stopping
 
 # Validation Requirements
-MIN_GAMES_REQUIRED = 5  # Minimum games a user must have
-MIN_PLAYTIME_REQUIRED = 60  # Minimum total playtime in minutes
+MIN_GAMES_REQUIRED = 7  # Minimum games a user must have
+MIN_PLAYTIME_REQUIRED = 1200  # Minimum total playtime in minutes
 
 # Rate Limiting
-DELAY_BETWEEN_USERS = 1  # Seconds to wait between processing users
-BATCH_SIZE = 15  # Number of users to process before a longer pause
-BATCH_DELAY = 30  # Seconds to wait after processing a batch
+DELAY_BETWEEN_USERS = 0.1  # Seconds to wait between processing users
+BATCH_SIZE = 30  # Number of users to process before a longer pause
+BATCH_DELAY = 15  # Seconds to wait after processing a batch
 
 # Steam ID Generation
 STEAM_ID_BASE = 76561197960265728  # Minimum Steam ID

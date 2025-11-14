@@ -89,47 +89,83 @@ async def get_collaborative_recommendations(
         
         print(f"User's top {top_n_games} games: {user_top_games}")
         
-        # 3. Find similar users who own any of the top games
-        # Get all users from database (excluding current user)
-        all_users_response = supabase.table('users').select('steam_id, games').neq('steam_id', steam_id).execute()
+        # Convert to set once for faster lookups
+        user_top_games_set = set(user_top_games)
         
-        if not all_users_response.data:
-            return {
-                "error": "No other users found in database",
-                "recommendations": [],
-                "similar_users": [],
-                "user_top_games": user_top_games
-            }
+        # Use max_similar_users as the early stop threshold (with some buffer for better results)
+        early_stop_threshold = max_similar_users * 10  # 10x buffer to ensure quality
         
-        # 4. Calculate similarity scores for each user
+        # 3. Find similar users who own any of the top games using pagination
+        # Process users in batches to avoid timeout
         similar_users = []
-        for other_user in all_users_response.data:
-            other_steam_id = other_user.get('steam_id')
-            other_games = other_user.get('games', {})
+        batch_size = 500  # Reduced batch size for faster individual queries
+        offset = 0
+        total_users_processed = 0
+        max_users_to_process = 10000  # Reduced - we'll use early stopping instead
+        
+        print(f"Starting batch processing of users (early stop at {early_stop_threshold} similar users)...")
+        
+        while offset < max_users_to_process:
+            # Early stopping: if we have enough highly similar users, stop fetching
+            if len(similar_users) >= early_stop_threshold:
+                print(f"Early stopping: found {len(similar_users)} similar users (threshold: {early_stop_threshold})")
+                break
             
-            if not other_games:
-                continue
+            # Fetch a batch of users - only select steam_id and games to reduce data transfer
+            batch_response = supabase.table('users').select('steam_id, games').neq('steam_id', steam_id).range(offset, offset + batch_size - 1).limit(batch_size).execute()
             
-            # Get other user's game appids
-            other_game_ids = set(int(appid) for appid in other_games.keys())
+            batch_count = len(batch_response.data) if batch_response.data else 0
             
-            # Calculate overlap with user's top games
-            overlap = len(set(user_top_games) & other_game_ids)
+            if batch_count == 0:
+                print(f"No more users found at offset {offset}")
+                break
             
-            if overlap > 0:
-                # Calculate similarity score based on:
-                # 1. Number of matching top games
-                # 2. Total games in common
+            print(f"Processing batch at offset {offset}: {batch_count} users")
+            
+            # 4. Calculate similarity scores for users in this batch
+            for other_user in batch_response.data:
+                other_steam_id = other_user.get('steam_id')
+                other_games = other_user.get('games', {})
+                
+                if not other_games:
+                    continue
+                
+                # Quick check: convert keys to set of ints (do this once per user)
+                try:
+                    other_game_ids = set(int(appid) for appid in other_games.keys())
+                except (ValueError, TypeError):
+                    continue
+                
+                # Fast intersection using set operations
+                overlap_count = len(user_top_games_set & other_game_ids)
+                
+                # Skip users with no overlap (most common case)
+                if overlap_count == 0:
+                    continue
+                
+                # Calculate total overlap only if top games match (lazy evaluation)
                 total_overlap = len(user_owned_games & other_game_ids)
-                similarity_score = overlap * 10 + total_overlap  # Weight top games higher
+                similarity_score = overlap_count * 10 + total_overlap  # Weight top games higher
                 
                 similar_users.append({
                     "steam_id": other_steam_id,
                     "similarity_score": similarity_score,
-                    "top_games_overlap": overlap,
+                    "top_games_overlap": overlap_count,
                     "total_games_overlap": total_overlap,
                     "games": other_game_ids
                 })
+            
+            total_users_processed += batch_count
+            
+            # If we got fewer users than batch_size, we've reached the end of the table
+            if batch_count < batch_size:
+                print(f"Reached end of user table (got {batch_count} users, expected {batch_size})")
+                break
+            
+            # Move to next batch
+            offset += batch_size
+        
+        print(f"Finished processing {total_users_processed} users, found {len(similar_users)} similar users")
         
         # Sort by similarity score and take top N
         similar_users.sort(key=lambda x: x["similarity_score"], reverse=True)
@@ -192,7 +228,7 @@ async def get_collaborative_recommendations(
             "recommendations": recommendations_list,
             "similar_users": similar_users_summary,
             "user_top_games": user_top_games,
-            "total_users_analyzed": len(all_users_response.data),
+            "total_users_analyzed": total_users_processed,
             "similar_users_found": len(top_similar_users)
         }
         
