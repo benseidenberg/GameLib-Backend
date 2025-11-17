@@ -72,6 +72,7 @@ async def update_user_data(steam_id: int):
         # Fetch fresh Steam player profile data
         print(f"Fetching Steam player profile for steam_id: {steam_id}")
         player_profile = await fetch_steam_player_summary(steam_id)
+        games_data, df = await fetch_steam_profile(steam_id)
         
         if not player_profile:
             raise Exception("Could not fetch Steam player profile")
@@ -92,7 +93,8 @@ async def update_user_data(steam_id: int):
         # Update database with fresh player profile data and incremented login_count
         update_payload = {
             'data': player_profile,
-            'login_count': current_login_count
+            'login_count': current_login_count,
+            'games': games_data
         }
         print(f"Update payload: {update_payload}")
         
