@@ -94,7 +94,7 @@ async def update_user_data(steam_id: int):
         update_payload = {
             'data': player_profile,
             'login_count': current_login_count,
-            'games': games_data
+            'games': df
         }
         print(f"Update payload: {update_payload}")
         
