@@ -80,7 +80,7 @@ def is_content_appropriate(game_data):
                 return False
             
             # Check descriptor notes for sexual content keywords
-            sexual_keywords = ['sexual', 'nudity', 'mature', 'adult', 'erotic', 'hentai']
+            sexual_keywords = ['sexual', 'mature', 'adult', 'erotic', 'hentai']
             if any(keyword in descriptor_notes.lower() for keyword in sexual_keywords):
                 return False
         
@@ -101,7 +101,7 @@ def is_content_appropriate(game_data):
         # List of inappropriate keywords
         inappropriate_keywords = [
             'hentai', 'porn', 'erotic', 'xxx', 'adult only', 'sexual',
-            'nudity', 'strip', 'mature content', 'adult content'
+             'strip', 'mature content', 'adult content'
         ]
         
         # Check if any inappropriate keywords are in the title or description
