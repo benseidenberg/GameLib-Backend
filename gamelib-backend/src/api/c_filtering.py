@@ -14,7 +14,7 @@ async def get_collaborative_filtering_recommendations(
     steam_id: int,
     top_n_games: Optional[int] = 5,
     min_playtime: Optional[int] = 600,
-    max_similar_users: Optional[int] = 150,
+    max_similar_users: Optional[int] = 1000,
     max_recommendations: Optional[int] = 20,
     genres: Optional[List[str]] = Query(None),
     max_price: Optional[float] = None
@@ -41,11 +41,14 @@ async def get_collaborative_filtering_recommendations(
         buffer_multiplier = 3 if (genres or max_price is not None) else 1
         internal_max_recommendations = max_recommendations * buffer_multiplier if max_recommendations else 60
         
+        # Handle "no limit" case for max_similar_users (large number means no practical limit)
+        effective_max_similar_users = max_similar_users if (max_similar_users and max_similar_users < 500000) else 999999
+        
         result = await get_collaborative_recommendations(
             steam_id=steam_id,
             top_n_games=top_n_games if top_n_games is not None else 5,
             min_playtime=min_playtime if min_playtime is not None else 600,
-            max_similar_users=max_similar_users if max_similar_users is not None else 10,
+            max_similar_users=effective_max_similar_users,
             max_recommendations=internal_max_recommendations
         )
         
@@ -61,8 +64,6 @@ async def get_collaborative_filtering_recommendations(
             }
         
         # Fetch game details from Steam API for each recommendation
-    
-        
         recommendations_with_details = []
         
         async with httpx.AsyncClient() as client:
