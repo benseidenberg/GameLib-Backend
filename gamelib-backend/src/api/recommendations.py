@@ -13,14 +13,18 @@ if not STEAM_API_KEY:
 router = APIRouter()
 
 
-async def get_steam_app_details(app_id: int):
+async def get_steam_app_details(app_id: int, skip_content_filter: bool = False):
     """
     Fetch detailed game information from Steam API with content filtering
+    
+    Args:
+        app_id: Steam app ID
+        skip_content_filter: If True, skips content appropriateness check (for database population)
     """
     try:
         url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&format=json"
         
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(url)
             
             if response.status_code == 200:
@@ -31,20 +35,36 @@ async def get_steam_app_details(app_id: int):
                 if app_data and app_data.get('success') and 'data' in app_data:
                     game_data = app_data['data']
                     
-                    # Check if content is appropriate
-                    if not is_content_appropriate(game_data):
+                    # Check if content is appropriate (unless skipped)
+                    if not skip_content_filter and not is_content_appropriate(game_data):
                         print(f"DEBUG: Filtered out inappropriate content for app_id: {app_id}")
                         return None
+                    
+                    # Extract price information
+                    is_free = game_data.get('is_free', False)
+                    price_usd = None
+                    price_formatted = 'Free'
+                    
+                    if not is_free and 'price_overview' in game_data:
+                        price_info = game_data['price_overview']
+                        price_usd = price_info.get('final', 0) / 100.0  # Convert cents to dollars
+                        price_formatted = price_info.get('final_formatted', 'N/A')
                     
                     # Extract relevant information
                     game_info = {
                         "app_id": app_id,
                         "title": game_data.get('name', 'Unknown Game'),
                         "description": game_data.get('short_description', ''),
+                        "detailed_description": game_data.get('detailed_description', ''),
                         "image": game_data.get('header_image', ''),
-                        "price": game_data.get('price_overview', {}).get('final_formatted', 'Free'),
+                        "price": price_formatted,
+                        "price_usd": price_usd,
+                        "is_free": is_free,
                         "genres": [genre.get('description', '') for genre in game_data.get('genres', [])],
                         "categories": [cat.get('description', '') for cat in game_data.get('categories', [])],
+                        "platforms": game_data.get('platforms', {}),
+                        "metacritic": game_data.get('metacritic', {}),
+                        "content_descriptors": game_data.get('content_descriptors', {}),
                         "developers": game_data.get('developers', []),
                         "publishers": game_data.get('publishers', []),
                         "release_date": game_data.get('release_date', {}).get('date', ''),
