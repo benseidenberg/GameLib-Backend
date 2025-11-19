@@ -6,8 +6,10 @@ It fetches games in batches of 100 and enriches each with detailed metadata.
 
 Usage:
     python populate_games_db.py
+    python populate_games_db.py --mode populate --token YOUR_TOKEN
+    python populate_games_db.py --mode update
 
-The script will prompt for your Steam Web API access token.
+The script will prompt for your Steam Web API access token if not provided.
 """
 
 import asyncio
@@ -15,6 +17,7 @@ import httpx
 import json
 import sys
 import os
+import argparse
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from pathlib import Path
@@ -26,6 +29,63 @@ sys.path.insert(0, str(src_dir))
 
 from db.supabase_client import supabase
 import time
+
+
+def load_existing_tags(tags_file_path: Path) -> set:
+    """
+    Load existing tags from tags.txt file
+    
+    Args:
+        tags_file_path: Path to the tags.txt file
+    
+    Returns:
+        Set of existing tags
+    """
+    if not tags_file_path.exists():
+        return set()
+    
+    try:
+        content = tags_file_path.read_text(encoding='utf-8').strip()
+        if not content:
+            return set()
+        # Split by comma and strip whitespace from each tag
+        tags = {tag.strip() for tag in content.split(',') if tag.strip()}
+        return tags
+    except Exception as e:
+        print(f"Warning: Could not load existing tags: {e}")
+        return set()
+
+
+def save_new_tags(tags_file_path: Path, new_tags: set):
+    """
+    Append new tags to tags.txt file
+    
+    Args:
+        tags_file_path: Path to the tags.txt file
+        new_tags: Set of new tags to add
+    """
+    if not new_tags:
+        return
+    
+    try:
+        # Read existing content
+        existing_content = ''
+        if tags_file_path.exists():
+            existing_content = tags_file_path.read_text(encoding='utf-8').strip()
+        
+        # Prepare new tags as comma-separated string
+        new_tags_str = ', '.join(sorted(new_tags))
+        
+        # Append to file
+        if existing_content:
+            updated_content = existing_content + ', ' + new_tags_str
+        else:
+            updated_content = new_tags_str
+        
+        tags_file_path.write_text(updated_content, encoding='utf-8')
+        print(f"  💾 Added {len(new_tags)} new tags to tags.txt")
+    except Exception as e:
+        print(f"  Warning: Could not save new tags: {e}")
 
 
 # Define a standalone version of get_steam_app_details to avoid import issues
@@ -95,6 +155,47 @@ async def get_steam_app_details(app_id: int, skip_content_filter: bool = True) -
         return None
 
 
+async def get_steamspy_details(app_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Fetch game information from SteamSpy API
+    
+    Args:
+        app_id: Steam app ID
+    
+    Returns:
+        Dictionary containing SteamSpy data (tags, languages, positive, negative) or None
+    """
+    try:
+        url = f"https://steamspy.com/api.php?request=appdetails&appid={app_id}"
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Extract only the fields we need
+                # Convert tags dict to array of just the tag names (keys)
+                tags_dict = data.get('tags', {})
+                tags_array = list(tags_dict.keys()) if tags_dict else []
+                
+                steamspy_info = {
+                    "tags": tags_array,
+                    "languages": data.get('languages', '').split(', ') if data.get('languages') else [],
+                    "positive": data.get('positive', 0),
+                    "negative": data.get('negative', 0)
+                }
+                
+                return steamspy_info
+            else:
+                print(f"  SteamSpy HTTP {response.status_code} for app {app_id}")
+                return None
+                
+    except Exception as e:
+        print(f"  Error fetching SteamSpy details for {app_id}: {str(e)}")
+        return None
+
+
 async def get_steam_app_list(access_token: str, last_appid: int = 0, max_results: int = 100) -> Dict[str, Any]:
     """
     Fetch a list of Steam games from the Steam API
@@ -127,14 +228,14 @@ async def get_steam_app_list(access_token: str, last_appid: int = 0, max_results
 
 async def get_game_details_with_retry(app_id: int, max_retries: int = 10) -> Optional[Dict[str, Any]]:
     """
-    Fetch detailed game information with retry logic and rate limit handling
+    Fetch detailed game information from both Steam and SteamSpy with retry logic
     
     Args:
         app_id: Steam app ID
         max_retries: Maximum retry attempts for non-rate-limit errors
     
     Returns:
-        Dictionary containing detailed game information or None if not found
+        Dictionary containing combined Steam and SteamSpy information or None if not found
     """
     import random
     
@@ -143,9 +244,25 @@ async def get_game_details_with_retry(app_id: int, max_retries: int = 10) -> Opt
     
     while attempt < max_retries:
         try:
+            # Fetch from Steam API
             game_details = await get_steam_app_details(app_id, skip_content_filter=True)
             
             if game_details:
+                # Fetch from SteamSpy API (no retry needed, it's more reliable)
+                steamspy_details = await get_steamspy_details(app_id)
+                
+                # Merge SteamSpy data into game_details
+                if steamspy_details:
+                    game_details.update(steamspy_details)
+                else:
+                    # Add empty values if SteamSpy fails
+                    game_details.update({
+                        "tags": [],
+                        "languages": [],
+                        "positive": 0,
+                        "negative": 0
+                    })
+                
                 return game_details
             else:
                 # Game not found or no data (not an error, just doesn't exist)
@@ -156,7 +273,7 @@ async def get_game_details_with_retry(app_id: int, max_retries: int = 10) -> Opt
             if "429" in str(e) or "rate limit" in str(e).lower():
                 # Rate limited - wait 30-60 seconds and retry indefinitely
                 rate_limit_retries += 1
-                wait_time = random.randint(30, 60)
+                wait_time = random.randint(10, 50)
                 print(f"  ⚠️  Rate limited! Waiting {wait_time} seconds before retry #{rate_limit_retries}...")
                 await asyncio.sleep(wait_time)
                 # Don't increment attempt counter for rate limits - keep trying
@@ -224,7 +341,7 @@ def format_game_data(app_id: int, name: str, game_details: Optional[Dict[str, An
     Args:
         app_id: Steam app ID
         name: Game name
-        game_details: Detailed game information from get_steam_app_details
+        game_details: Detailed game information from get_game_details_with_retry (includes SteamSpy data)
     
     Returns:
         Formatted dictionary ready for database insertion or None if essential data is missing
@@ -237,18 +354,22 @@ def format_game_data(app_id: int, name: str, game_details: Optional[Dict[str, An
             "detailed_desc": None,
             "short_desc": None,
             "image": None,
-            "platforms": {},  # Store as dict, not JSON string
-            "categories": [],  # Store as list, not JSON string
-            "genres": [],  # Store as list, not JSON string
+            "platforms": {},
+            "categories": [],
+            "genres": [],
             "release_date": None,
-            "metacritic": {},  # Store as dict, not JSON string
-            "content": {},  # Store as dict, not JSON string
+            "metacritic": {},
+            "content": {},
             "is_free": False,
             "price": None,
             "price_usd": None,
-            "developers": [],  # Store as list, not JSON string
-            "publishers": [],  # Store as list, not JSON string
-            "steam_url": None
+            "developers": [],
+            "publishers": [],
+            "steam_url": None,
+            "tags": [],
+            "languages": [],
+            "positive": 0,
+            "negative": 0
         }
     
     # Data already extracted by get_steam_app_details
@@ -261,35 +382,42 @@ def format_game_data(app_id: int, name: str, game_details: Optional[Dict[str, An
     developers = game_details.get('developers', [])
     publishers = game_details.get('publishers', [])
     steam_url = game_details.get('steam_url', '')
-    # Categories and genres are already lists of descriptions (strings)
     categories = game_details.get('categories', [])
     genres = game_details.get('genres', [])
+    
+    # SteamSpy data
+    tags = game_details.get('tags', [])
+    languages = game_details.get('languages', [])
+    positive = game_details.get('positive', 0)
+    negative = game_details.get('negative', 0)
     
     # Parse release date
     release_date_str = game_details.get('release_date', '')
     release_date = parse_release_date(release_date_str)
     
-    # Format the data - store lists and objects directly (not as JSON strings)
-    # Supabase/PostgreSQL will handle the JSON/JSONB conversion
+    # Format the data
     formatted_data = {
         "game_id": app_id,
         "name": game_details.get('title', name),
         "detailed_desc": game_details.get('detailed_description'),
         "short_desc": game_details.get('description'),
         "image": game_details.get('image'),
-        "platforms": platforms,  # Store as dict, not JSON string
-        "categories": categories,  # Store as list, not JSON string
-        "genres": genres,  # Store as list, not JSON string
+        "platforms": platforms,
+        "categories": categories,
+        "genres": genres,
         "release_date": release_date,
-        "metacritic": metacritic,  # Store as dict, not JSON string
-        "content": content_descriptors,  # Store as dict, not JSON string
+        "metacritic": metacritic,
+        "content": content_descriptors,
         "is_free": is_free,
         "price": price,
         "price_usd": price_usd,
-        "developers": developers,  # Store as list, not JSON string
-        "publishers": publishers,  # Store as list, not JSON string
-        "steam_url": steam_url
-        
+        "developers": developers,
+        "publishers": publishers,
+        "steam_url": steam_url,
+        "tags": tags,
+        "languages": languages,
+        "positive": positive,
+        "negative": negative
     }
     
     return formatted_data
@@ -360,18 +488,21 @@ def game_exists_in_db(game_id: int) -> bool:
         return False
 
 
-async def process_game_batch(games: List[Dict[str, Any]], batch_number: int) -> int:
+async def process_game_batch(games: List[Dict[str, Any]], batch_number: int, existing_tags: set, tags_file_path: Path) -> tuple[int, set]:
     """
     Process a batch of games and insert them into the database
     
     Args:
         games: List of game dictionaries from Steam API
         batch_number: Current batch number for logging
+        existing_tags: Set of tags already in tags.txt
+        tags_file_path: Path to the tags.txt file
     
     Returns:
-        Number of successfully processed games
+        Tuple of (number of successfully processed games, set of new tags found)
     """
     successful_count = 0
+    new_tags_in_batch = set()
     
     print(f"\n{'='*60}")
     print(f"Processing Batch #{batch_number} ({len(games)} games)")
@@ -394,16 +525,25 @@ async def process_game_batch(games: List[Dict[str, Any]], batch_number: int) -> 
         
         print(f"\n[{idx}/{len(games)}] Processing: {name} (ID: {app_id})")
         
+        # Start timing for this game
+        game_start_time = time.time()
+        
         # Fetch detailed information
         game_details = await get_game_details_with_retry(app_id)
         
         # Add a small delay to avoid rate limiting
-        await asyncio.sleep(0.75)
+        await asyncio.sleep(0.85)
         
         # Format the data
         formatted_data = format_game_data(app_id, name, game_details)
         
         if formatted_data:
+            # Track new tags from this game
+            game_tags = formatted_data.get('tags', [])
+            for tag in game_tags:
+                if tag and tag not in existing_tags and tag not in new_tags_in_batch:
+                    new_tags_in_batch.add(tag)
+            
             # Insert into database
             if insert_game_to_db(formatted_data):
                 print(f"  ✓ Successfully inserted {name}")
@@ -413,11 +553,17 @@ async def process_game_batch(games: List[Dict[str, Any]], batch_number: int) -> 
         else:
             print(f"  ✗ Could not format data for {name}")
     
+    # Save any new tags found in this batch
+    if new_tags_in_batch:
+        save_new_tags(tags_file_path, new_tags_in_batch)
+    
     print(f"\n{'='*60}")
     print(f"Batch #{batch_number} Complete: {successful_count}/{len(games)} successful")
+    if new_tags_in_batch:
+        print(f"New tags discovered: {len(new_tags_in_batch)}")
     print(f"{'='*60}\n")
     
-    return successful_count
+    return successful_count, new_tags_in_batch
 
 
 async def populate_games_db(access_token: str):
@@ -438,6 +584,14 @@ async def populate_games_db(access_token: str):
     last_appid = get_highest_game_id()
     batch_number = 1
     total_processed = 0
+    total_time_elapsed = 0.0
+    overall_start_time = time.time()
+    
+    # Load existing tags and set up tags file path
+    tags_file_path = Path(__file__).resolve().parent / 'tags.txt'
+    existing_tags = load_existing_tags(tags_file_path)
+    total_new_tags = 0
+    print(f"Loaded {len(existing_tags)} existing tags from tags.txt")
     
     print(f"\nStarting from app_id: {last_appid}")
     print("Press Ctrl+C to stop the process at any time.\n")
@@ -453,8 +607,8 @@ async def populate_games_db(access_token: str):
                 app_list_response = await get_steam_app_list(access_token, last_appid, max_results=100)
             except Exception as e:
                 print(f"\n❌ Error fetching app list: {e}")
-                print("Waiting 60 seconds before retrying...")
-                await asyncio.sleep(60)
+                print("Waiting 30 seconds before retrying...")
+                await asyncio.sleep(30)
                 continue
             
             # Extract games from response
@@ -470,8 +624,17 @@ async def populate_games_db(access_token: str):
             print(f"Fetched {len(apps)} games")
             
             # Process the batch
-            successful = await process_game_batch(apps, batch_number)
+            successful, new_tags = await process_game_batch(apps, batch_number, existing_tags, tags_file_path)
             total_processed += successful
+            
+            # Update existing tags set with new tags found
+            if new_tags:
+                existing_tags.update(new_tags)
+                total_new_tags += len(new_tags)
+            
+            # Calculate timing statistics
+            total_time_elapsed = time.time() - overall_start_time
+            avg_time_per_game = total_time_elapsed / total_processed if total_processed > 0 else 0
             
             # Update last_appid for next iteration
             last_appid = apps[-1].get('appid', last_appid)
@@ -479,22 +642,33 @@ async def populate_games_db(access_token: str):
             print(f"\n📊 Progress Summary:")
             print(f"   Batches processed: {batch_number}")
             print(f"   Total games added: {total_processed}")
+            print(f"   Total unique tags: {len(existing_tags)} ({total_new_tags} new)")
             print(f"   Current app_id: {last_appid}")
+            print(f"   Total time elapsed: {total_time_elapsed:.2f}s ({total_time_elapsed/60:.2f} min)")
+            print(f"   Average time per game: {avg_time_per_game:.2f}s")
+            print(f"   Estimated games/hour: {int(3600 / avg_time_per_game) if avg_time_per_game > 0 else 0}")
             
             batch_number += 1
             
             # Small delay between batches
-            print("\nWaiting 5 seconds before next batch...\n")
-            await asyncio.sleep(5)
-            
+            print("\nWaiting 30 seconds before next batch...\n")
+            await asyncio.sleep(30)
+
     except KeyboardInterrupt:
+        total_time_elapsed = time.time() - overall_start_time
+        avg_time_per_game = total_time_elapsed / total_processed if total_processed > 0 else 0
+        
         print("\n\n" + "="*60)
         print("Process interrupted by user")
         print("="*60)
-        print(f"\nFinal Statistics:")
+        print("\nFinal Statistics:")
         print(f"  Batches processed: {batch_number - 1}")
         print(f"  Total games added: {total_processed}")
+        print(f"  Total unique tags collected: {len(existing_tags)} ({total_new_tags} new)")
         print(f"  Last app_id: {last_appid}")
+        print(f"  Total time elapsed: {total_time_elapsed:.2f}s ({total_time_elapsed/60:.2f} min)")
+        print(f"  Average time per game: {avg_time_per_game:.2f}s")
+        print(f"  Games processed per hour: {int(3600 / avg_time_per_game) if avg_time_per_game > 0 else 0}")
         print("\nYou can resume by running the script again.")
         print("="*60 + "\n")
     except Exception as e:
@@ -505,30 +679,198 @@ async def populate_games_db(access_token: str):
         print("\nDatabase population process ended.")
 
 
+async def update_existing_games_with_steamspy():
+    """
+    Update all existing games in the database with SteamSpy data (tags, languages, positive, negative)
+    
+    This function fetches all games from the database and enriches them with SteamSpy information.
+    It will automatically skip games that already have SteamSpy data, so you can safely restart it.
+    """
+    print("\n" + "="*60)
+    print("STEAMSPY DATA UPDATER")
+    print("="*60 + "\n")
+    
+    # Fetch games from database that don't have SteamSpy data yet (tags is null or empty)
+    print("Fetching games without SteamSpy data from database...")
+    try:
+        result = supabase.table('games_db').select('game_id, name, tags').is_('tags', 'null').execute()
+        games = result.data
+    except Exception as e:
+        print(f"❌ Error fetching games from database: {e}")
+        return
+    
+    if not games:
+        print("✓ All games already have SteamSpy data!")
+        return
+    
+    total_games = len(games)
+    print(f"Found {total_games} games to update\n")
+    print("Press Ctrl+C to stop the process at any time.\n")
+    
+    updated_count = 0
+    failed_count = 0
+    skipped_count = 0
+    start_time = time.time()
+    
+    try:
+        for idx, game in enumerate(games, 1):
+            game_id = game.get('game_id')
+            game_name = game.get('name', 'Unknown')
+            
+            if not game_id:
+                print(f"[{idx}/{total_games}] Skipping game with no ID")
+                skipped_count += 1
+                continue
+            
+            print(f"[{idx}/{total_games}] Updating {game_name} (ID: {game_id})")
+            
+            # Fetch SteamSpy data
+            steamspy_data = await get_steamspy_details(game_id)
+            
+            if steamspy_data:
+                # Update database with SteamSpy data
+                try:
+                    update_result = supabase.table('games_db').update({
+                        'tags': steamspy_data.get('tags', {}),
+                        'languages': steamspy_data.get('languages', []),
+                        'positive': steamspy_data.get('positive', 0),
+                        'negative': steamspy_data.get('negative', 0)
+                    }).eq('game_id', game_id).execute()
+                    
+                    print(f"  ✓ Updated with {len(steamspy_data.get('tags', {}))} tags, {len(steamspy_data.get('languages', []))} languages")
+                    updated_count += 1
+                except Exception as e:
+                    print(f"  ✗ Failed to update in database: {e}")
+                    failed_count += 1
+            else:
+                print(f"  ✗ No SteamSpy data available")
+                failed_count += 1
+            
+            # Add delay to avoid overwhelming SteamSpy
+            await asyncio.sleep(1)
+            
+            # Progress update every 100 games
+            if idx % 100 == 0:
+                elapsed_time = time.time() - start_time
+                avg_time = elapsed_time / idx
+                remaining = total_games - idx
+                est_remaining_time = avg_time * remaining
+                
+                print(f"\n📊 Progress Update:")
+                print(f"   Updated: {updated_count} | Failed: {failed_count} | Skipped: {skipped_count}")
+                print(f"   Time elapsed: {elapsed_time/60:.1f} min")
+                print(f"   Est. remaining: {est_remaining_time/60:.1f} min")
+                print(f"   Avg time/game: {avg_time:.2f}s\n")
+    
+    except KeyboardInterrupt:
+        print("\n\n" + "="*60)
+        print("Process interrupted by user")
+        print("="*60)
+    
+    # Final statistics
+    elapsed_time = time.time() - start_time
+    print("\n" + "="*60)
+    print("STEAMSPY UPDATE COMPLETE")
+    print("="*60)
+    print(f"\nFinal Statistics:")
+    print(f"  Total games processed: {updated_count + failed_count + skipped_count}")
+    print(f"  Successfully updated: {updated_count}")
+    print(f"  Failed: {failed_count}")
+    print(f"  Skipped: {skipped_count}")
+    print(f"  Total time: {elapsed_time/60:.1f} minutes")
+    print(f"  Average time per game: {elapsed_time/(updated_count + failed_count) if (updated_count + failed_count) > 0 else 0:.2f}s")
+    print("="*60 + "\n")
+
+
 def main():
     """
     Entry point for the script
     """
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='Steam Games Database Populator')
+    parser.add_argument('--mode', choices=['populate', 'update'], help='Mode: populate (add new games) or update (add SteamSpy data to existing)')
+    parser.add_argument('--token', help='Steam Web API access token (only for populate mode)')
+    args = parser.parse_args()
+    
+    # If arguments provided, run non-interactively
+    if args.mode:
+        if args.mode == 'populate':
+            access_token = args.token
+            if not access_token:
+                print("\n❌ Error: --token is required for populate mode!")
+                print("Usage: python populate_games_db.py --mode populate --token YOUR_TOKEN")
+                return
+            
+            print("\n" + "="*60)
+            print("POPULATE NEW GAMES (NON-INTERACTIVE MODE)")
+            print("="*60)
+            print("\nStarting database population...")
+            print("This will run continuously. Press Ctrl+C to stop.\n")
+            
+            asyncio.run(populate_games_db(access_token))
+        
+        elif args.mode == 'update':
+            print("\n" + "="*60)
+            print("UPDATE EXISTING GAMES WITH STEAMSPY DATA (NON-INTERACTIVE MODE)")
+            print("="*60)
+            print("\nStarting SteamSpy data update...")
+            print("Press Ctrl+C to stop.\n")
+            
+            asyncio.run(update_existing_games_with_steamspy())
+        
+        return
+    
+    # Interactive mode (original behavior)
     print("\n" + "="*60)
     print("Steam Games Database Populator")
     print("="*60)
-    print("\nThis script will populate your games_db table with Steam games.")
-    print("It will continuously fetch and process games until interrupted.")
-    print("\n" + "="*60 + "\n")
+    print("\nChoose an option:")
+    print("1. Populate database with new games (continuous)")
+    print("2. Update existing games with SteamSpy data")
+    print("="*60 + "\n")
     
-    # Prompt for access token
-    access_token = input("Enter your Steam Web API access token: ").strip()
+    choice = input("Enter your choice (1 or 2): ").strip()
     
-    if not access_token:
-        print("\n❌ Error: Access token is required!")
-        return
+    if choice == "1":
+        print("\n" + "="*60)
+        print("POPULATE NEW GAMES")
+        print("="*60)
+        print("\nThis will continuously fetch and process games until interrupted.")
+        print("\n" + "="*60 + "\n")
+        
+        # Prompt for access token
+        access_token = input("Enter your Steam Web API access token: ").strip()
+        
+        if not access_token:
+            print("\n❌ Error: Access token is required!")
+            return
+        
+        print("\n✓ Access token received")
+        print("\nStarting database population...")
+        print("This will run continuously. Press Ctrl+C to stop.\n")
+        
+        # Run the async function
+        asyncio.run(populate_games_db(access_token))
     
-    print("\n✓ Access token received")
-    print("\nStarting database population...")
-    print("This will run continuously. Press Ctrl+C to stop.\n")
+    elif choice == "2":
+        print("\n" + "="*60)
+        print("UPDATE EXISTING GAMES WITH STEAMSPY DATA")
+        print("="*60)
+        print("\nThis will update all existing games with SteamSpy data.")
+        print("(tags, languages, positive reviews, negative reviews)")
+        print("\n" + "="*60 + "\n")
+        
+        confirm = input("Continue? (y/n): ").strip().lower()
+        
+        if confirm == 'y':
+            print("\nStarting SteamSpy data update...")
+            print("Press Ctrl+C to stop.\n")
+            asyncio.run(update_existing_games_with_steamspy())
+        else:
+            print("\nCancelled.")
     
-    # Run the async function
-    asyncio.run(populate_games_db(access_token))
+    else:
+        print("\n❌ Invalid choice. Please run the script again and choose 1 or 2.")
 
 
 if __name__ == "__main__":

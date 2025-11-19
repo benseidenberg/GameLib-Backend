@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from src.recommender.recommender import get_game_clusters
+from src.db.supabase_client import supabase
 import os
 import httpx
 import asyncio
@@ -13,14 +14,65 @@ if not STEAM_API_KEY:
 router = APIRouter()
 
 
+async def get_game_from_db(app_id: int):
+    """
+    Fetch game details from games_db table first
+    
+    Args:
+        app_id: Steam app ID
+    
+    Returns:
+        Game info dict if found, None otherwise
+    """
+    try:
+        result = supabase.table('games_db').select('*').eq('game_id', app_id).execute()
+        
+        if result.data and len(result.data) > 0:
+            db_game = result.data[0]
+            
+            # Format database result to match Steam API structure
+            return {
+                "app_id": db_game.get('game_id'),
+                "title": db_game.get('name', 'Unknown Game'),
+                "description": db_game.get('short_desc', ''),
+                "detailed_description": db_game.get('detailed_desc', ''),
+                "image": db_game.get('image', ''),
+                "price": db_game.get('price', 'Free'),
+                "price_usd": db_game.get('price_usd'),
+                "is_free": db_game.get('is_free', False),
+                "genres": db_game.get('genres', []),
+                "categories": db_game.get('categories', []),
+                "platforms": db_game.get('platforms', {}),
+                "metacritic": db_game.get('metacritic', {}),
+                "content_descriptors": db_game.get('content', {}),
+                "developers": db_game.get('developers', []),
+                "publishers": db_game.get('publishers', []),
+                "release_date": str(db_game.get('release_date', '')),
+                "steam_url": db_game.get('steam_url', f"https://store.steampowered.com/app/{app_id}/")
+            }
+        
+        return None
+        
+    except Exception as e:
+        print(f"DEBUG: Error fetching game from database for {app_id}: {str(e)}")
+        return None
+
+
 async def get_steam_app_details(app_id: int, skip_content_filter: bool = False):
     """
-    Fetch detailed game information from Steam API with content filtering
+    Fetch detailed game information - checks database first, then Steam API as fallback
     
     Args:
         app_id: Steam app ID
         skip_content_filter: If True, skips content appropriateness check (for database population)
     """
+    # Try database first
+    db_game = await get_game_from_db(app_id)
+    if db_game:
+        print(f"DEBUG: Retrieved game {app_id} from database")
+        return db_game
+    
+    # Fallback to Steam API
     try:
         url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&format=json"
         
@@ -37,7 +89,6 @@ async def get_steam_app_details(app_id: int, skip_content_filter: bool = False):
                     
                     # Check if content is appropriate (unless skipped)
                     if not skip_content_filter and not is_content_appropriate(game_data):
-                        print(f"DEBUG: Filtered out inappropriate content for app_id: {app_id}")
                         return None
                     
                     # Extract price information
@@ -146,8 +197,17 @@ def is_content_appropriate(game_data):
 
 async def get_steam_app_details_basic(app_id: int):
     """
-    Fetch basic game details (just title and app_id) for source games
+    Fetch basic game details (title and app_id) - checks database first, then Steam API as fallback
     """
+    # Try database first
+    db_game = await get_game_from_db(app_id)
+    if db_game:
+        return {
+            "app_id": db_game.get('app_id'),
+            "title": db_game.get('title')
+        }
+
+    # Fallback to Steam API
     try:
         url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&format=json"
         
@@ -179,11 +239,8 @@ async def get_clusters(steam_id: int):
     """
     Get game recommendations/clusters for a user by Steam ID
     """
-    print(f"DEBUG: Starting recommendations for steam_id: {steam_id}")
     try:
-        print("DEBUG: About to call get_game_clusters")
         clusters = await get_game_clusters(steam_id)
-        print(f"DEBUG: get_game_clusters returned: {type(clusters)} - {clusters}")
         if not clusters:
             raise HTTPException(status_code=404, detail="No recommendations found")
         return clusters

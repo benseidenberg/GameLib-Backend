@@ -1,5 +1,4 @@
 # Placeholder for game recommendation ML logic
-STEAM_API_KEY="968317D323A2D4C8ED61E3D9F5E2FAB1"
 import pandas as pd
 import json
 import datetime
@@ -7,6 +6,10 @@ import asyncio
 from collections import Counter
 from typing import List, Dict, Set, Tuple
 from src.db.supabase_client import supabase
+from dotenv import load_dotenv
+import os
+load_dotenv()
+STEAM_API_KEY = os.getenv("STEAM_API_KEY")
 
 
 async def get_game_clusters(steam_id: int):
@@ -74,21 +77,23 @@ async def get_collaborative_recommendations(
         user_games_list = [
             {"appid": int(appid), "playtime": game_data.get("playtime_forever", 0)}
             for appid, game_data in user_games.items()
-            if game_data.get("playtime_forever", 0) >= min_playtime
         ]
         user_games_list.sort(key=lambda x: x["playtime"], reverse=True)
+        
+        # Get top N games by playtime (no minimum playtime filter for current user)
         user_top_games = [game["appid"] for game in user_games_list[:top_n_games]]
+        
         user_owned_games = set(int(appid) for appid in user_games.keys())
         
         if not user_top_games:
             return {
-                "error": "No games with sufficient playtime found",
+                "error": "User has no games",
                 "recommendations": [],
                 "similar_users": [],
                 "user_top_games": []
             }
         
-        print(f"User's top {top_n_games} games: {user_top_games}")
+        print(f"User's top {len(user_top_games)} games (requested {top_n_games}): {user_top_games}")
         
         # Convert to set once for faster lookups
         user_top_games_set = set(user_top_games)
@@ -116,7 +121,7 @@ async def get_collaborative_recommendations(
         async def fetch_and_process_batch(offset: int):
             """Fetch and process a single batch of users"""
             try:
-                batch_response = supabase.table('users').select('steam_id, games').neq('steam_id', steam_id).range(offset, offset + batch_size - 1).limit(batch_size).execute()
+                batch_response = supabase.table('users').select('steam_id, games, data').neq('steam_id', steam_id).range(offset, offset + batch_size - 1).limit(batch_size).execute()
                 
                 batch_users = []
                 batch_count = len(batch_response.data) if batch_response.data else 0
@@ -128,6 +133,7 @@ async def get_collaborative_recommendations(
                 for other_user in batch_response.data:
                     other_steam_id = other_user.get('steam_id')
                     other_games = other_user.get('games', {})
+                    other_data = other_user.get('data', {})
                     
                     if not other_games:
                         continue
@@ -151,10 +157,11 @@ async def get_collaborative_recommendations(
                     
                     batch_users.append({
                         "steam_id": other_steam_id,
+                        "persona_name": other_data.get('personaname', 'Unknown User'),
                         "similarity_score": similarity_score,
                         "top_games_overlap": overlap_count,
                         "total_games_overlap": total_overlap,
-                        "games": other_game_ids
+                        "games": other_games  # Store full game data with playtime info
                     })
                 
                 return batch_users, batch_count
@@ -214,22 +221,37 @@ async def get_collaborative_recommendations(
         print(f"Found {len(top_similar_users)} similar users")
         
         # 5. Aggregate game recommendations from similar users
+        # Apply min_playtime filter HERE - only recommend games that similar users played enough
         game_recommendations = Counter()
         game_sources = {}  # Track which users recommended each game
         
         for similar_user in top_similar_users:
-            # Get games this similar user has that current user doesn't
-            recommended_games = similar_user["games"] - user_owned_games
+            other_games = similar_user["games"]  # Full game data dict with playtime
             
-            # Weight recommendations by similarity score
-            weight = similar_user["similarity_score"]
-            
-            for game_id in recommended_games:
-                game_recommendations[game_id] += weight
+            # Get games this similar user has played for at least min_playtime
+            # that current user doesn't own
+            for appid_str, game_data in other_games.items():
+                try:
+                    appid = int(appid_str)
+                except (ValueError, TypeError):
+                    continue
                 
-                if game_id not in game_sources:
-                    game_sources[game_id] = []
-                game_sources[game_id].append(similar_user["steam_id"])
+                # Skip if current user already owns this game
+                if appid in user_owned_games:
+                    continue
+                
+                # Apply min_playtime filter: only recommend if similar user played enough
+                playtime = game_data.get("playtime_forever", 0)
+                if playtime < min_playtime:
+                    continue
+                
+                # Weight recommendations by similarity score
+                weight = similar_user["similarity_score"]
+                game_recommendations[appid] += weight
+                
+                if appid not in game_sources:
+                    game_sources[appid] = []
+                game_sources[appid].append(similar_user["steam_id"])
         
         # 6. Get top recommendations
         top_recommendations = game_recommendations.most_common(max_recommendations)
@@ -249,6 +271,7 @@ async def get_collaborative_recommendations(
         similar_users_summary = [
             {
                 "steam_id": user["steam_id"],
+                "persona_name": user["persona_name"],
                 "similarity_score": user["similarity_score"],
                 "top_games_overlap": user["top_games_overlap"],
                 "total_games_overlap": user["total_games_overlap"]
