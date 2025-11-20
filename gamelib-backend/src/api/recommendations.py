@@ -69,7 +69,6 @@ async def get_steam_app_details(app_id: int, skip_content_filter: bool = False):
     # Try database first
     db_game = await get_game_from_db(app_id)
     if db_game:
-        print(f"DEBUG: Retrieved game {app_id} from database")
         return db_game
     
     # Fallback to Steam API
@@ -138,61 +137,110 @@ def is_content_appropriate(game_data):
     Check if game content is appropriate (filters out sexual/adult content)
     """
     try:
+        game_name = game_data.get('name', 'Unknown')
+        
         # Check content descriptors for adult content
         content_descriptors = game_data.get('content_descriptors', {})
+        if not content_descriptors:
+            # Also check 'content' field (used in database format)
+            content_descriptors = game_data.get('content', {})
+        
         if content_descriptors:
             descriptor_ids = content_descriptors.get('ids', [])
-            descriptor_notes = content_descriptors.get('notes') or ''
+            descriptor_notes = content_descriptors.get('notes', '')
+                        
+            # Ensure descriptor_notes is a string
+            if descriptor_notes is None:
+                descriptor_notes = ''
             
             # Steam's adult content descriptor IDs
+            # 1: Violence, 2: Gore, 3: Nudity/Sexual Content, 4: Adult Only Sexual Content, 5: Frequent Violence/Gore
             adult_descriptor_ids = [3, 4]  # 3: Nudity/Sexual Content, 4: Adult Only Sexual Content
             
             if any(desc_id in adult_descriptor_ids for desc_id in descriptor_ids):
+                print(f"DEBUG is_content_appropriate: FILTERING {game_name} - Adult content descriptor IDs: {descriptor_ids}")
                 return False
             
             # Check descriptor notes for sexual content keywords
-            sexual_keywords = ['sexual', 'mature', 'adult', 'erotic', 'hentai']
-            if any(keyword in descriptor_notes.lower() for keyword in sexual_keywords):
-                return False
+            descriptor_notes_lower = descriptor_notes.lower()
+            sexual_keywords = [
+                'sexual content', 'nudity', 'mature content', 'adult', 'erotic', 
+                'hentai', 'nsfw', 'xxx', 'porn', '18+', 'adults only'
+            ]
+            for keyword in sexual_keywords:
+                if keyword in descriptor_notes_lower:
+                    print(f"DEBUG: Filtered game due to keyword '{keyword}' in content notes")
+                    return False
         
         # Check age ratings
         required_age = game_data.get('required_age', 0)
         if required_age >= 18:
-            # Additional check for adult content categories
-            categories = game_data.get('categories', [])
-            for category in categories:
-                cat_desc = (category.get('description') or '').lower()
-                if 'adult only' in cat_desc or 'mature' in cat_desc:
-                    return False
+            print(f"DEBUG: Filtered game due to required_age >= 18: {required_age}")
+            return False
         
         # Check game name and description for inappropriate content
         game_name = (game_data.get('name') or '').lower()
         game_desc = (game_data.get('short_description') or '').lower()
+        detailed_desc = (game_data.get('detailed_description') or '').lower()
         
         # List of inappropriate keywords
         inappropriate_keywords = [
             'hentai', 'porn', 'erotic', 'xxx', 'adult only', 'sexual',
-             'strip', 'mature content', 'adult content'
+            'strip', 'mature content', 'adult content', 'nsfw', '18+',
+            'ecchi', 'lewd', 'nudity', 'sexy', 'adults only'
         ]
         
         # Check if any inappropriate keywords are in the title or description
         for keyword in inappropriate_keywords:
-            if keyword in game_name or keyword in game_desc:
+            if keyword in game_name:
                 return False
+            if keyword in game_desc or keyword in detailed_desc:
+                return False
+        
+        # Check tags for adult content
+        tags = game_data.get('tags', [])
+        if tags:
+            tags_lower = [tag.lower() if isinstance(tag, str) else str(tag).lower() for tag in tags]
+            adult_tags = [
+                'hentai', 'sexual content', 'nudity', 'adult', 'erotic', 'nsfw',
+                'mature', 'xxx', 'porn', '18+', 'adults only', 'ecchi', 'lewd'
+            ]
+            for tag in tags_lower:
+                for adult_tag in adult_tags:
+                    if adult_tag in tag:
+                        return False
         
         # Check genres for adult content
         genres = game_data.get('genres', [])
         for genre in genres:
-            genre_desc = (genre.get('description') or '').lower()
-            if any(keyword in genre_desc for keyword in ['adult', 'sexual', 'mature']):
+            if isinstance(genre, dict):
+                genre_desc = (genre.get('description') or '').lower()
+            else:
+                genre_desc = str(genre).lower()
+            
+            adult_genre_keywords = ['adult', 'sexual', 'mature', 'hentai', 'erotic']
+            for keyword in adult_genre_keywords:
+                if keyword in genre_desc:
+                    return False
+        
+        # Check categories for adult content
+        categories = game_data.get('categories', [])
+        for category in categories:
+            if isinstance(category, dict):
+                cat_desc = (category.get('description') or '').lower()
+            else:
+                cat_desc = str(category).lower()
+            
+            if 'adult only' in cat_desc or 'mature content' in cat_desc:
                 return False
         
         return True
         
     except Exception as e:
-        print(f"DEBUG: Error in content filtering: {str(e)}")
-        # If there's an error in filtering, err on the side of caution and allow the content
-        return True
+        import traceback
+        traceback.print_exc()
+        # If there's an error in filtering, err on the side of caution and filter it out
+        return False
 
 
 async def get_steam_app_details_basic(app_id: int):
@@ -346,14 +394,11 @@ async def get_steam_game_details_endpoint(app_id: int):
     Get detailed information about a specific Steam game
     """
     try:
-        print(f"DEBUG: Fetching game details for app_id: {app_id}")
         game_info = await get_steam_app_details(app_id)
         
         if not game_info:
-            print(f"DEBUG: No game info returned for app_id: {app_id}")
             raise HTTPException(status_code=404, detail=f"Game with app_id {app_id} not found or filtered out")
         
-        print(f"DEBUG: Successfully fetched game details for: {game_info.get('title', 'Unknown')}")
         return game_info
         
     except HTTPException:
@@ -379,9 +424,7 @@ async def test_recommendations(steam_id: int):
             # Handle the actual structure: clusters_data['response']['clusters']
             response_data = clusters_data.get('response', {})
             clusters_list = response_data.get('clusters', [])
-            
-            print(f"DEBUG: Found {len(clusters_list)} clusters")
-            
+                        
             if clusters_list:
                 # Sort clusters by relevance (recent playtime + total playtime + popularity)
                 def cluster_score(cluster):
@@ -396,12 +439,10 @@ async def test_recommendations(steam_id: int):
                 # Sort clusters by relevance score
                 sorted_clusters = sorted(clusters_list, key=cluster_score, reverse=True)
                 
-                print(f"DEBUG: Top clusters by relevance:")
                 for i, cluster in enumerate(sorted_clusters[:5]):
                     score = cluster_score(cluster)
                     recent = cluster.get('playtime_2weeks', 0)
                     total = cluster.get('playtime_forever', 0)
-                    print(f"  Cluster {cluster.get('cluster_id')}: score={score:.1f}, recent={recent}min, total={total}min")
                 
                 # Take from the most relevant clusters - ONE game per cluster for variety
                 for cluster in sorted_clusters[:10]:  # Check top 10 clusters to ensure we get 5 games
@@ -409,7 +450,6 @@ async def test_recommendations(steam_id: int):
                         break
                         
                     cluster_id = cluster.get('cluster_id')
-                    print(f"DEBUG: Processing cluster {cluster_id}")
                     
                     # Get played games and similar games
                     similar_apps = cluster.get('similar_items_appids', [])
@@ -419,10 +459,6 @@ async def test_recommendations(steam_id: int):
                     if similar_apps:
                         similar_apps = list(similar_apps)  # Make a copy
                         random.shuffle(similar_apps)
-                    
-                    print(f"DEBUG: Found {len(played_apps)} played apps and {len(similar_apps)} similar apps")
-                    print(f"DEBUG: Played games in this cluster: {played_apps}")
-                    print(f"DEBUG: Similar games available: {similar_apps[:8]}")  # Show first 8
                     
                     # For each cluster, we'll pick one played game as the "source"
                     # and recommend ONE similar game based on it
@@ -442,14 +478,10 @@ async def test_recommendations(steam_id: int):
                                 existing_app_ids = [item[0] for item in app_ids_with_source]
                                 if app_id not in existing_app_ids:
                                     app_ids_with_source.append((app_id, source_game_info))
-                                    print(f"DEBUG: Added similar app_id: {app_id} based on {source_game_info['title']}")
                                     break  # Only take ONE game per cluster
-        
-        print(f"DEBUG: Final app_ids with sources: {[(item[0], item[1]['title']) for item in app_ids_with_source]}")
-        
+                
         # If we don't have enough games from clusters, add some popular games as fallback
         if len(app_ids_with_source) < 5:
-            print(f"DEBUG: Only got {len(app_ids_with_source)} games from clusters, adding fallback games")
             fallback_games = [570, 440, 730]  # Dota 2, TF2, CS:GO
             
             for app_id in fallback_games:
@@ -462,7 +494,6 @@ async def test_recommendations(steam_id: int):
         
         # Limit to 5 games
         app_ids_with_source = app_ids_with_source[:5]
-        print(f"DEBUG: Final app_ids to fetch: {[item[0] for item in app_ids_with_source]}")
         
         # Fetch game details for each app ID with content filtering
         games_data = []
@@ -479,7 +510,6 @@ async def test_recommendations(steam_id: int):
         
         # If we don't have enough games after filtering, try to get more from additional clusters
         if len(games_data) < 5 and clusters_data:
-            print(f"DEBUG: Only got {len(games_data)} appropriate games, fetching more...")
             response_data = clusters_data.get('response', {})
             clusters_list = response_data.get('clusters', [])
             

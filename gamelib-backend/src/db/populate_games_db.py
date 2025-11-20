@@ -525,14 +525,11 @@ async def process_game_batch(games: List[Dict[str, Any]], batch_number: int, exi
         
         print(f"\n[{idx}/{len(games)}] Processing: {name} (ID: {app_id})")
         
-        # Start timing for this game
-        game_start_time = time.time()
-        
         # Fetch detailed information
         game_details = await get_game_details_with_retry(app_id)
         
         # Add a small delay to avoid rate limiting
-        await asyncio.sleep(0.85)
+        await asyncio.sleep(0.5)
         
         # Format the data
         formatted_data = format_game_data(app_id, name, game_details)

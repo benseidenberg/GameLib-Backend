@@ -64,7 +64,6 @@ async def fetch_steam_player_summary(steam_id: int):
             
             if players:
                 player_data = players[0]
-                print(f"Fetched Steam player summary: {player_data}")
                 return player_data  # Returns player data with personaname, profileurl, avatarfull, etc.
             else:
                 print(f"No player data found for steam_id: {steam_id}")

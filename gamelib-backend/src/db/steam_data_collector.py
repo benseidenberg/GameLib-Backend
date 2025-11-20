@@ -208,12 +208,20 @@ async def fetch_and_store_steam_user(steam_id: int) -> bool:
         
         print(f"✓ Total playtime: {total_playtime} minutes ({total_playtime/60:.1f} hours)")
         
+        # Create games_array: sorted list of game IDs by playtime_forever
+        games_array = sorted(
+            games_dict.keys(),
+            key=lambda game_id: games_dict[game_id].get('playtime_forever', 0),
+            reverse=True
+        )
+        
         # Store in database
         print(f"→ Storing user in database...")
         response = supabase.table("users").insert({
             "steam_id": steam_id,
             "data": player_profile,
             "games": games_dict,
+            "games_array": games_array,
             "login_count": 0  # Set to 0 for auto-collected users
         }).execute()
         

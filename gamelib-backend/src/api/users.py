@@ -13,11 +13,24 @@ router = APIRouter()
 @router.post("/users/", response_model=UserResponse)
 async def create_user(user: UserCreate):
     try:
-        response = supabase.table("users").insert({
+        # Create games_array if games data is provided
+        insert_data = {
             "steam_id": user.steam_id, 
             "data": user.data, 
             "login_count": user.login_count
-        }).execute()
+        }
+        
+        # Add games_array if games exist
+        if hasattr(user, 'games') and user.games is not None:
+            user_games = user.games
+            games_array = sorted(
+                user_games.keys(),
+                key=lambda game_id: user_games[game_id].get('playtime_forever', 0) if isinstance(user_games[game_id], dict) else 0,
+                reverse=True
+            )
+            insert_data["games_array"] = games_array
+        
+        response = supabase.table("users").insert(insert_data).execute()
         if not response.data:
             raise HTTPException(status_code=400, detail="Failed to create user")
         return UserResponse(**response.data[0])
@@ -96,6 +109,16 @@ async def update_user_data(steam_id: int):
             'login_count': current_login_count,
             'games': df
         }
+        
+        # Generate games_array from games data
+        if df and isinstance(df, dict):
+            games_array = sorted(
+                df.keys(),
+                key=lambda game_id: df[game_id].get('playtime_forever', 0) if isinstance(df[game_id], dict) else 0,
+                reverse=True
+            )
+            update_payload['games_array'] = games_array
+        
         print(f"Update payload: {update_payload}")
         
         response = supabase.table('users').update(update_payload).eq('steam_id', steam_id).execute()
@@ -158,6 +181,16 @@ async def update_user(steam_id: int, user: Optional[UserCreate] = None, refresh_
             update_data: dict = {"data": user.data}
             if user.login_count is not None:
                 update_data["login_count"] = user.login_count
+            
+            # Add games_array if games exist
+            if hasattr(user, 'games') and user.games is not None:
+                user_games = user.games
+                games_array = sorted(
+                    user_games.keys(),
+                    key=lambda game_id: user_games[game_id].get('playtime_forever', 0) if isinstance(user_games[game_id], dict) else 0,
+                    reverse=True
+                )
+                update_data["games_array"] = games_array
             
             response = supabase.table("users").update(update_data).eq("steam_id", steam_id).execute()
             if not response.data:
@@ -228,7 +261,6 @@ async def get_user_name(steam_id: int):
             return {"name": player_name}
         else:
             # User doesn't exist in database, trigger login process to create them
-            print(f"User {steam_id} not found in database, creating user via login process")
             
             try:
                 login_result = await user_login(steam_id)

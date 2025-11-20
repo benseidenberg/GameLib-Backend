@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query
 from src.recommender.recommender import get_collaborative_recommendations
 from src.db.supabase_client import supabase
+from src.api.recommendations import is_content_appropriate
 from typing import Optional, List
 import httpx
 import os
@@ -104,8 +105,8 @@ async def get_all_games_by_filter(
                 limit=limit
             )
         
-        # No filters - just fetch and return
-        query = query.limit(limit)
+        # No filters - just fetch and return, sorted by positive reviews
+        query = query.order('positive', desc=True).limit(limit)
         result = query.execute()
         
         if not result.data:
@@ -220,15 +221,12 @@ async def get_all_games_by_filter_python(
         else:
             fetch_limit = limit
         
-        query = query.limit(fetch_limit)
+        # Sort by positive reviews in descending order
+        query = query.order('positive', desc=True).limit(fetch_limit)
         result = query.execute()
         
         if not result.data:
             return []
-        
-        print(f"DEBUG: Fetched {len(result.data)} games after SQL-level filtering (genres, languages, categories)")
-        print(f"DEBUG: Remaining filters - platforms: {platforms}, release_date: {min_release_date} to {max_release_date}")
-        print(f"DEBUG: Review filters - positive >= {min_positive_reviews}, negative >= {min_negative_reviews}")
         
         games_list = []
         checked_count = 0
@@ -284,6 +282,23 @@ async def get_all_games_by_filter_python(
             price_usd = db_game.get('price_usd', 0.0) or 0.0
             price_formatted = db_game.get('price', 'Free')
             
+            # Check content appropriateness (filter out adult content)
+            # Convert database format to format expected by is_content_appropriate
+            game_data_for_filter = {
+                'name': db_game.get('name', ''),
+                'short_description': db_game.get('short_desc', ''),
+                'detailed_description': db_game.get('detailed_desc', ''),
+                'content_descriptors': db_game.get('content', {}),
+                'content': db_game.get('content', {}),
+                'required_age': db_game.get('required_age', 0) or 0,
+                'tags': db_game.get('tags', []),
+                'categories': [{'description': cat} for cat in game_categories] if isinstance(game_categories, list) else [],
+                'genres': [{'description': genre} for genre in game_genres] if isinstance(game_genres, list) else []
+            }
+            
+            if not is_content_appropriate(game_data_for_filter):
+                continue
+            
             games_list.append({
                 "appid": db_game.get('game_id'),
                 "name": db_game.get('name', f"Game {db_game.get('game_id')}"),
@@ -308,7 +323,6 @@ async def get_all_games_by_filter_python(
             if len(games_list) >= limit:
                 break
         
-        print(f"DEBUG: Checked {checked_count} games, Python filtering returned {len(games_list)} matching games")
         return games_list
         
     except Exception as e:
@@ -358,6 +372,9 @@ async def get_filtered_games_from_db_batch(
         # Apply price filter at SQL level
         if max_price is not None:
             query = query.lte('price_usd', max_price)
+        
+        # Sort by positive reviews in descending order
+        query = query.order('positive', desc=True)
         
         # Execute query
         result = query.execute()
@@ -463,6 +480,24 @@ async def get_filtered_games_from_db_batch(
             price_usd = db_game.get('price_usd', 0.0) or 0.0
             price_formatted = db_game.get('price', 'Free')
             
+            # Check content appropriateness (filter out adult content)
+            # Convert database format to format expected by is_content_appropriate
+            game_data_for_filter = {
+                'name': db_game.get('name', ''),
+                'short_description': db_game.get('short_desc', ''),
+                'detailed_description': db_game.get('detailed_desc', ''),
+                'content_descriptors': db_game.get('content', {}),
+                'content': db_game.get('content', {}),  # Also include as 'content' for database format
+                'required_age': db_game.get('required_age', 0) or 0,
+                'tags': db_game.get('tags', []),
+                'categories': [{'description': cat} for cat in game_categories] if isinstance(game_categories, list) else [],
+                'genres': [{'description': genre} for genre in game_genres] if isinstance(game_genres, list) else []
+            }
+            
+            if not is_content_appropriate(game_data_for_filter):
+                filtered_out_count += 1
+                continue
+            
             games_dict[appid] = {
                 "appid": appid,
                 "name": db_game.get('name', f"Game {appid}"),
@@ -484,9 +519,6 @@ async def get_filtered_games_from_db_batch(
                 "steam_url": db_game.get('steam_url', f"https://store.steampowered.com/app/{appid}")
             }
         
-        if filtered_out_count > 0:
-            print(f"DEBUG: Filtered out {filtered_out_count} games due to filter mismatch")
-        print(f"DEBUG: Returning {len(games_dict)} games after all filters")
         
         return games_dict
         
@@ -579,12 +611,6 @@ async def get_collaborative_filtering_recommendations(
         # 2. Prioritize games that appear in collaborative recommendations
         # 3. Fill remaining slots with other filtered games
         if has_filters:
-            print(f"DEBUG: Using filter-first approach")
-            print(f"  steam_genres: {steam_genres}, languages: {languages}, categories: {steam_categories}")
-            print(f"  platforms: {platforms}, max_price: {max_price}")
-            print(f"  release_date: {min_release_date} to {max_release_date}")
-            print(f"  positive_reviews >= {min_positive_reviews}, negative_reviews >= {min_negative_reviews}")
-            
             # Get all games matching filters
             all_filtered_games = await get_all_games_by_filter(
                 steam_genres=steam_genres,
@@ -642,9 +668,7 @@ async def get_collaborative_filtering_recommendations(
             remaining_slots = (max_recommendations or 20) - len(recommendations_with_details)
             if remaining_slots > 0:
                 recommendations_with_details.extend(other_filtered[:remaining_slots])
-            
-            print(f"DEBUG: Returning {len(recommendations_with_details)} games ({len(recommended_filtered)} collaborative + {min(remaining_slots, len(other_filtered))} other filtered)")
-            
+                        
             return {
                 "success": True,
                 "recommendations": recommendations_with_details,
@@ -655,14 +679,10 @@ async def get_collaborative_filtering_recommendations(
                 "failed_games_count": 0
             }
         
-        # No filters: use original approach (fetch only recommended games)
-        print(f"DEBUG: Using recommendation-first approach (no filters)")
-        
         # Extract all appids from recommendations
         recommended_appids = [rec["appid"] for rec in result.get("recommendations", [])]
         
         # Batch fetch games from database with filtering
-        print(f"DEBUG: Batch fetching {len(recommended_appids)} games from database with filters")
         db_games = await get_filtered_games_from_db_batch(
             recommended_appids,
             steam_genres=steam_genres,
@@ -721,6 +741,10 @@ async def get_collaborative_filtering_recommendations(
                             if str(appid) in data and data[str(appid)]["success"]:
                                 game_data = data[str(appid)]["data"]
                                 
+                                # Check content appropriateness first
+                                if not is_content_appropriate(game_data):
+                                    continue
+                                
                                 # Extract game details
                                 game_genres = [g["description"] for g in game_data.get("genres", [])]
                                 price_data = game_data.get("price_overview", {})
@@ -737,12 +761,10 @@ async def get_collaborative_filtering_recommendations(
                                 # Apply steam genre filter
                                 if steam_genres:
                                     if not any(genre in game_genres for genre in steam_genres):
-                                        print(f"Game {appid} filtered out by steam genre")
                                         continue
                                 
                                 # Apply price filter
                                 if max_price is not None and price_usd > max_price:
-                                    print(f"Game {appid} filtered out by price: ${price_usd} > ${max_price}")
                                     continue
                                 
                                 rec = rec_map.get(appid, {})
@@ -767,7 +789,6 @@ async def get_collaborative_filtering_recommendations(
                         print(f"Error fetching details for game {appid}: {str(e)}")
                         failed_games.append(appid)
         
-        print(f"Successfully fetched details for {len(recommendations_with_details)} games")
         if failed_games:
             print(f"Failed to fetch details for {len(failed_games)} games: {failed_games[:10]}")
         
