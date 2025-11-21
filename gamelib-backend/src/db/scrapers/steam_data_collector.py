@@ -1,41 +1,35 @@
 """
 Continuously running background worker that collects Steam user data
 and populates the database for collaborative filtering.
-Uses a BFS (Breadth-First Search) friend-based crawling approach starting from existing users.
+Simplified approach: randomly select existing users → fetch their friends → add friends to database.
 """
+
+import sys
+from pathlib import Path
+
+# Add project root to Python path for proper imports
+project_root = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(project_root))
 
 import asyncio
 import random
 import os
 from dotenv import load_dotenv
-from pathlib import Path
 import httpx
 from datetime import datetime
-from typing import List, Set, Dict
-from collections import deque
+from typing import List, Dict, Optional
 from src.db.supabase_client import supabase
-from src.api.steam_breakdown import fetch_steam_profile, fetch_steam_player_summary
+from src.schemas.user_schema import User
 
-# Import configuration
-try:
-    from src.db.collector_config import (
-        TARGET_USERS, MAX_ATTEMPTS, MIN_GAMES_REQUIRED, MIN_PLAYTIME_REQUIRED,
-        DELAY_BETWEEN_USERS, BATCH_SIZE, BATCH_DELAY, STEAM_ID_BASE, 
-        STEAM_ID_MAX_OFFSET, MAX_RETRIES, REQUEST_TIMEOUT
-    )
-except ImportError:
-    # Fallback to default values if config not found
-    TARGET_USERS = 50
-    MAX_ATTEMPTS = 500
-    MIN_GAMES_REQUIRED = 5
-    MIN_PLAYTIME_REQUIRED = 60
-    DELAY_BETWEEN_USERS = 2
-    BATCH_SIZE = 10
-    BATCH_DELAY = 30
-    STEAM_ID_BASE = 76561197960265728
-    STEAM_ID_MAX_OFFSET = 300000000
-    MAX_RETRIES = 3
-    REQUEST_TIMEOUT = 10
+
+# Configuration
+MIN_GAMES_REQUIRED = 5
+MIN_PLAYTIME_REQUIRED = 1200  # minutes
+DELAY_BETWEEN_USERS = 0.5  # seconds
+BATCH_SIZE = 100  # Process this many users before longer delay
+BATCH_DELAY = 30  # seconds between batches
+REQUEST_TIMEOUT = 10  # seconds
+FRIENDS_PER_USER = 50  # How many friends to fetch per user
 
 # Load environment variables
 current_dir = Path(__file__).resolve().parent
@@ -45,15 +39,26 @@ load_dotenv(dotenv_path=env_path)
 STEAM_API_KEY = os.getenv("STEAM_API_KEY")
 
 
-async def get_all_existing_steam_ids() -> List[int]:
-    """Get all Steam IDs currently in the database"""
+async def get_random_users_from_db(count: int = 5) -> List[int]:
+    """Get random users from the database to fetch their friends"""
     try:
         response = supabase.table('users').select('steam_id').execute()
+        
+        if not response.data:
+            print("⚠️  No users found in database")
+            return []
+        
         steam_ids = [user['steam_id'] for user in response.data]
-        print(f"Found {len(steam_ids)} existing users in database")
-        return steam_ids
+        
+        # Return random sample
+        sample_size = min(count, len(steam_ids))
+        random_users = random.sample(steam_ids, sample_size)
+        
+        print(f"✓ Selected {len(random_users)} random users from database ({len(steam_ids)} total)")
+        return random_users
+        
     except Exception as e:
-        print(f"Error fetching existing Steam IDs: {e}")
+        print(f"✗ Error fetching random users: {e}")
         return []
 
 
@@ -74,33 +79,24 @@ async def get_friend_list(steam_id: int) -> List[int]:
             response = await client.get(url, params=params, timeout=REQUEST_TIMEOUT)
             
             if response.status_code == 401:
-                print(f"Friend list for {steam_id} is private")
+                print(f"  ⚠️  Friend list for {steam_id} is private")
                 return []
             
             if response.status_code != 200:
-                print(f"Failed to fetch friend list for {steam_id}: {response.status_code}")
+                print(f"  ✗ Failed to fetch friend list: {response.status_code}")
                 return []
             
             data = response.json()
             friends = data.get('friendslist', {}).get('friends', [])
             
             friend_ids = [int(friend['steamid']) for friend in friends]
-            print(f"Found {len(friend_ids)} friends for Steam ID {steam_id}")
+            print(f"  ✓ Found {len(friend_ids)} friends")
             
             return friend_ids
             
     except Exception as e:
-        print(f"Error fetching friend list for {steam_id}: {e}")
+        print(f"  ✗ Error fetching friend list: {e}")
         return []
-
-
-def generate_random_steam_id() -> int:
-    """
-    Generate a random Steam ID within the valid range.
-    Used as fallback if no seed users exist.
-    """
-    random_id = STEAM_ID_BASE + random.randint(0, STEAM_ID_MAX_OFFSET)
-    return random_id
 
 
 async def check_if_user_exists(steam_id: int) -> bool:
@@ -109,7 +105,7 @@ async def check_if_user_exists(steam_id: int) -> bool:
         response = supabase.table('users').select('steam_id').eq('steam_id', steam_id).execute()
         return len(response.data) > 0
     except Exception as e:
-        print(f"Error checking user existence: {e}")
+        print(f"  ✗ Error checking user existence: {e}")
         return False
 
 
@@ -142,13 +138,13 @@ async def validate_steam_profile(steam_id: int) -> bool:
             # Check if profile is public (communityvisibilitystate == 3)
             visibility = player.get('communityvisibilitystate', 0)
             if visibility != 3:
-                print(f"Profile {steam_id} is private or not fully public")
+                print(f"  ⚠️  Profile is private or not fully public")
                 return False
             
             return True
             
     except Exception as e:
-        print(f"Error validating Steam profile {steam_id}: {e}")
+        print(f"  ✗ Error validating Steam profile: {e}")
         return False
 
 
@@ -158,43 +154,49 @@ async def fetch_and_store_steam_user(steam_id: int) -> bool:
     Returns True if successful, False otherwise.
     """
     try:
-        print(f"\n{'='*60}")
-        print(f"Processing Steam ID: {steam_id}")
-        print(f"{'='*60}")
+        print(f"\n  → Processing Steam ID: {steam_id}")
         
         # Check if user already exists
         if await check_if_user_exists(steam_id):
-            print(f"✓ User {steam_id} already exists in database, skipping...")
+            print(f"    ✓ Already exists, skipping...")
             return False
         
         # Validate profile exists and is public
-        print(f"→ Validating profile...")
         if not await validate_steam_profile(steam_id):
-            print(f"✗ Profile {steam_id} is invalid or private, skipping...")
+            print(f"    ✗ Invalid or private profile, skipping...")
             return False
         
-        print(f"✓ Profile is valid and public")
-        
         # Fetch player summary
-        print(f"→ Fetching player summary...")
-        player_profile = await fetch_steam_player_summary(steam_id)
+        player_profile = await User.fetch_player_summary(steam_id)
         
         if not player_profile:
-            print(f"✗ Could not fetch player profile for {steam_id}")
+            print(f"    ✗ Could not fetch player profile")
             return False
         
         persona_name = player_profile.get('personaname', 'Unknown')
-        print(f"✓ Found user: {persona_name}")
         
-        # Fetch games data
-        print(f"→ Fetching games library...")
-        games_data, games_dict = await fetch_steam_profile(steam_id)
+        # Fetch games data using the User method
+        profile_data = await User.fetch_profile_data(steam_id)
         
-        if not games_dict or len(games_dict) < MIN_GAMES_REQUIRED:
-            print(f"✗ User {steam_id} has insufficient games ({len(games_dict) if games_dict else 0} games)")
+        if not profile_data or not profile_data.get('games'):
+            print(f"    ✗ Could not fetch games data")
             return False
         
-        print(f"✓ Found {len(games_dict)} games")
+        # Convert games list to dict format
+        games_dict = {}
+        for game in profile_data['games']:
+            game_id = str(game.get('appid'))
+            games_dict[game_id] = {
+                'name': game.get('name', 'Unknown Game'),
+                'playtime_forever': game.get('playtime_forever', 0),
+                'playtime_2weeks': game.get('playtime_2weeks', 0),
+                'img_icon_url': game.get('img_icon_url', ''),
+                'rtime_last_played': game.get('rtime_last_played', 0)
+            }
+        
+        if not games_dict or len(games_dict) < MIN_GAMES_REQUIRED:
+            print(f"    ✗ Insufficient games ({len(games_dict) if games_dict else 0})")
+            return False
         
         # Calculate total playtime
         total_playtime = sum(
@@ -203,10 +205,8 @@ async def fetch_and_store_steam_user(steam_id: int) -> bool:
         )
         
         if total_playtime < MIN_PLAYTIME_REQUIRED:
-            print(f"✗ User {steam_id} has insufficient playtime ({total_playtime} minutes)")
+            print(f"    ✗ Insufficient playtime ({total_playtime} minutes)")
             return False
-        
-        print(f"✓ Total playtime: {total_playtime} minutes ({total_playtime/60:.1f} hours)")
         
         # Create games_array: sorted list of game IDs by playtime_forever
         games_array = sorted(
@@ -216,7 +216,6 @@ async def fetch_and_store_steam_user(steam_id: int) -> bool:
         )
         
         # Store in database
-        print(f"→ Storing user in database...")
         response = supabase.table("users").insert({
             "steam_id": steam_id,
             "data": player_profile,
@@ -226,103 +225,16 @@ async def fetch_and_store_steam_user(steam_id: int) -> bool:
         }).execute()
         
         if not response.data:
-            print(f"✗ Failed to store user {steam_id} in database")
+            print(f"    ✗ Failed to store in database")
             return False
         
-        print(f"✓ Successfully added {persona_name} (Steam ID: {steam_id}) to database!")
-        print(f"  - Games: {len(games_dict)}")
-        print(f"  - Total playtime: {total_playtime/60:.1f} hours")
+        print(f"    ✓ Successfully added {persona_name} ({len(games_dict)} games, {total_playtime/60:.1f}h)")
         
         return True
         
     except Exception as e:
-        print(f"✗ Error processing Steam ID {steam_id}: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        print(f"    ✗ Error: {str(e)}")
         return False
-
-
-async def scrape_user_and_friends(steam_id: int) -> Dict:
-    """
-    Scrape a user and all their friends synchronously.
-    If user is not found in database, scrape them and their entire friend network.
-    
-    Returns a dict with:
-        - user_added: bool - whether the main user was added
-        - friends_added: int - number of friends successfully added
-        - friends_found: int - total friends found
-        - all_friend_ids: List[int] - all friend IDs discovered
-    """
-    result = {
-        'user_added': False,
-        'friends_added': 0,
-        'friends_found': 0,
-        'all_friend_ids': []
-    }
-    
-    print(f"\n{'='*70}")
-    print(f"🔍 SCRAPING USER AND FRIENDS: {steam_id}")
-    print(f"{'='*70}")
-    
-    # Try to add the main user
-    user_success = await fetch_and_store_steam_user(steam_id)
-    result['user_added'] = user_success
-    
-    # Get all friends of this user
-    print(f"\n→ Fetching complete friend list for {steam_id}...")
-    friend_ids = await get_friend_list(steam_id)
-    result['friends_found'] = len(friend_ids)
-    result['all_friend_ids'] = friend_ids
-    
-    if not friend_ids:
-        print(f"✗ No friends found for {steam_id}")
-        return result
-    
-    print(f"✓ Found {len(friend_ids)} friends, attempting to scrape all...")
-    
-    # Scrape all friends synchronously
-    for idx, friend_id in enumerate(friend_ids, 1):
-        print(f"\n[Friend {idx}/{len(friend_ids)}]")
-        
-        # Check if friend already exists
-        if await check_if_user_exists(friend_id):
-            print(f"  ✓ Friend {friend_id} already in database, skipping")
-            continue
-        
-        # Try to add friend
-        friend_success = await fetch_and_store_steam_user(friend_id)
-        if friend_success:
-            result['friends_added'] += 1
-        
-        # Rate limiting
-        await asyncio.sleep(DELAY_BETWEEN_USERS)
-    
-    print(f"\n{'='*70}")
-    print(f"✓ SCRAPING COMPLETE FOR {steam_id}")
-    print(f"  - Main user added: {'Yes' if result['user_added'] else 'No'}")
-    print(f"  - Friends found: {result['friends_found']}")
-    print(f"  - Friends added: {result['friends_added']}")
-    print(f"{'='*70}\n")
-    
-    return result
-
-
-async def get_or_scrape_user(steam_id: int) -> bool:
-    """
-    Check if user exists in database. If not, scrape them and all their friends.
-    Returns True if user now exists in database (either already existed or was just added).
-    """
-    # Check if user already exists
-    if await check_if_user_exists(steam_id):
-        print(f"✓ User {steam_id} found in database")
-        return True
-    
-    print(f"⚠️  User {steam_id} not found in database - initiating full scrape...")
-    
-    # Scrape user and all friends
-    result = await scrape_user_and_friends(steam_id)
-    
-    return result['user_added']
 
 
 async def run_continuous_collector(
@@ -330,21 +242,27 @@ async def run_continuous_collector(
     max_attempts: int = 1000
 ):
     """
-    Continuously collect Steam user data using BFS (Breadth-First Search) friend-based crawling.
-    Starts from existing users in the database and crawls their friends level by level.
-    If a user is not found, will scrape them and all their friends synchronously.
+    Continuously collect Steam user data by randomly selecting existing users
+    and scraping their friends.
+    
+    Simple approach:
+    1. Get random users from database
+    2. Fetch their friend lists
+    3. Try to add those friends to database
+    4. Repeat
     
     Args:
         target_users: Number of users to collect
         max_attempts: Maximum attempts before stopping
     """
     print("\n" + "="*70)
-    print("STEAM DATA COLLECTOR - BFS FRIEND-BASED CRAWLING")
+    print("STEAM DATA COLLECTOR - FRIEND SCRAPING")
     print("="*70)
     print(f"Target users: {target_users}")
     print(f"Max attempts: {max_attempts}")
     print(f"Min games required: {MIN_GAMES_REQUIRED}")
     print(f"Min playtime required: {MIN_PLAYTIME_REQUIRED} minutes")
+    print(f"Friends per user: {FRIENDS_PER_USER}")
     print("="*70 + "\n")
     
     users_added = 0
@@ -353,96 +271,68 @@ async def run_continuous_collector(
     
     start_time = datetime.now()
     
-    # Get existing users from database to use as seeds
-    print("→ Fetching existing users from database as seed users...")
-    existing_steam_ids = await get_all_existing_steam_ids()
-    
-    # BFS data structures
-    visited: Set[int] = set(existing_steam_ids)  # All IDs we've seen
-    bfs_queue: deque = deque()  # Queue for BFS (FIFO)
-    current_level = 0
-    
-    # If we have existing users, add SOME of their friends to BFS queue (not all)
-    if existing_steam_ids:
-        # Only use first 3-5 users as seeds to get the ball rolling
-        seed_count = min(5, len(existing_steam_ids))
-        seed_users = existing_steam_ids[:seed_count]
-        
-        print(f"→ Initializing BFS with {seed_count} seed users (out of {len(existing_steam_ids)} total)...")
-        print(f"→ Fetching friends (Level 1) from seeds only...")
-        
-        # Get friends from ONLY the seed users (not all existing users)
-        for seed_id in seed_users:
-            friends = await get_friend_list(seed_id)
-            for friend_id in friends:
-                if friend_id not in visited:
-                    bfs_queue.append(friend_id)
-                    visited.add(friend_id)
-            await asyncio.sleep(0.5)  # Rate limit
-        
-        print(f"✓ BFS initialized with {len(bfs_queue)} Level 1 friends from {seed_count} seeds")
-        print(f"  (Skipped {len(existing_steam_ids) - seed_count} existing users to speed up initialization)\n")
-    else:
-        print("⚠️  No existing users in database. Starting with random Steam IDs.\n")
-        # Add some random Steam IDs to start
-        for _ in range(5):
-            random_id = generate_random_steam_id()
-            if random_id not in visited:
-                bfs_queue.append(random_id)
-                visited.add(random_id)
-    
     try:
         while users_added < target_users and attempts < max_attempts:
-            attempts += 1
+            # Get random users from database
+            random_users = await get_random_users_from_db(count=BATCH_SIZE)
             
-            # Check if queue is empty
-            if not bfs_queue:
-                print("⚠️  BFS queue empty, generating random Steam IDs...")
-                for _ in range(5):
-                    random_id = generate_random_steam_id()
-                    if random_id not in visited:
-                        bfs_queue.append(random_id)
-                        visited.add(random_id)
+            if not random_users:
+                print("⚠️  No users in database to fetch friends from. Please add seed users first.")
+                break
             
-            # BFS: Process next user in queue (FIFO)
-            steam_id = bfs_queue.popleft()
+            print(f"\n{'='*70}")
+            print(f"BATCH {batch_count + 1}: Processing {len(random_users)} random users")
+            print(f"{'='*70}")
             
-            print(f"\n[BFS] Processing from queue (Queue size: {len(bfs_queue)}, Visited: {len(visited)})")
-            
-            # Try to fetch and store (or scrape if not found)
-            success = await fetch_and_store_steam_user(steam_id)
-            
-            if success:
-                users_added += 1
-                batch_count += 1
+            # For each random user, get their friends
+            for user_idx, steam_id in enumerate(random_users, 1):
+                print(f"\n[{user_idx}/{len(random_users)}] Fetching friends for Steam ID: {steam_id}")
                 
-                # BFS: Add this user's friends to the END of the queue (breadth-first)
-                print(f"→ [BFS] Adding friends to queue...")
-                friends = await get_friend_list(steam_id)
-                new_friends = 0
-                for friend_id in friends:
-                    if friend_id not in visited:
-                        bfs_queue.append(friend_id)  # Add to END for BFS
-                        visited.add(friend_id)
-                        new_friends += 1
+                # Get friend list
+                friend_ids = await get_friend_list(steam_id)
                 
-                print(f"✓ [BFS] Added {new_friends} new friends to queue (total queue: {len(bfs_queue)})")
+                if not friend_ids:
+                    print(f"  ⚠️  No friends found or friend list is private")
+                    continue
                 
-                print(f"\n{'*'*60}")
-                print(f"PROGRESS: {users_added}/{target_users} users added ({attempts} attempts)")
-                print(f"Success rate: {(users_added/attempts)*100:.1f}%")
-                print(f"BFS Queue size: {len(bfs_queue)}")
-                print(f"Total visited: {len(visited)}")
-                print(f"{'*'*60}\n")
+                # Limit number of friends to process
+                friends_to_process = friend_ids[:FRIENDS_PER_USER]
+                print(f"  → Processing {len(friends_to_process)} friends (out of {len(friend_ids)} total)...")
+                
+                # Try to add each friend
+                for friend_id in friends_to_process:
+                    attempts += 1
+                    
+                    success = await fetch_and_store_steam_user(friend_id)
+                    
+                    if success:
+                        users_added += 1
+                        
+                        print(f"\n{'*'*60}")
+                        print(f"PROGRESS: {users_added}/{target_users} users added ({attempts} attempts)")
+                        print(f"Success rate: {(users_added/attempts)*100:.1f}%")
+                        print(f"{'*'*60}\n")
+                        
+                        # Check if we hit target
+                        if users_added >= target_users:
+                            break
+                    
+                    # Delay between users
+                    await asyncio.sleep(DELAY_BETWEEN_USERS)
+                
+                # Check if we hit target
+                if users_added >= target_users:
+                    break
             
-            # Delay between users
-            await asyncio.sleep(DELAY_BETWEEN_USERS)
+            batch_count += 1
             
-            # Longer delay after batch
-            if batch_count >= BATCH_SIZE:
-                print(f"\n--- Batch complete ({BATCH_SIZE} users), pausing for {BATCH_DELAY} seconds ---\n")
-                await asyncio.sleep(BATCH_DELAY)
-                batch_count = 0
+            # Check if we hit target or max attempts
+            if users_added >= target_users or attempts >= max_attempts:
+                break
+            
+            # Longer delay between batches
+            print(f"\n--- Batch complete, pausing for {BATCH_DELAY} seconds ---\n")
+            await asyncio.sleep(BATCH_DELAY)
         
         # Final summary
         end_time = datetime.now()
@@ -456,8 +346,6 @@ async def run_continuous_collector(
         print(f"Success rate: {(users_added/attempts)*100:.1f}%")
         print(f"Duration: {duration/60:.1f} minutes")
         print(f"Average time per user: {duration/users_added:.1f} seconds" if users_added > 0 else "N/A")
-        print(f"Remaining in queue: {len(bfs_queue)}")
-        print(f"Total users visited: {len(visited)}")
         print("="*70 + "\n")
         
     except KeyboardInterrupt:
@@ -466,8 +354,6 @@ async def run_continuous_collector(
         print("="*70)
         print(f"Users added: {users_added}")
         print(f"Total attempts: {attempts}")
-        print(f"Remaining in queue: {len(bfs_queue)}")
-        print(f"Total users visited: {len(visited)}")
         print("="*70 + "\n")
     
     except Exception as e:
@@ -479,11 +365,12 @@ async def run_continuous_collector(
 async def main():
     """Main entry point for the collector"""
     await run_continuous_collector(
-        target_users=TARGET_USERS,
-        max_attempts=MAX_ATTEMPTS
+        target_users=10000,
+        max_attempts=500
     )
 
 
 if __name__ == "__main__":
     # Run the collector
     asyncio.run(main())
+

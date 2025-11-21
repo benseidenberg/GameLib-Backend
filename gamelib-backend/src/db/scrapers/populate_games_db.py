@@ -24,10 +24,10 @@ from pathlib import Path
 
 # Add src directory to path
 current_dir = Path(__file__).resolve().parent
-src_dir = current_dir.parent
-sys.path.insert(0, str(src_dir))
+project_root = current_dir.parent.parent
+sys.path.insert(0, str(project_root))
 
-from db.supabase_client import supabase
+from src.db.supabase_client import supabase
 import time
 
 
@@ -208,17 +208,11 @@ async def get_steam_app_list(access_token: str, last_appid: int = 0, max_results
     Returns:
         Dictionary containing the API response with game list
     """
-    url = "https://api.steampowered.com/IStoreService/GetAppList/v1/"
-    params = {
-        "access_token": access_token,
-        "have_description_language": "english",
-        "last_appid": last_appid,
-        "max_results": max_results
-    }
+    url = f"https://api.steampowered.com/IStoreService/GetAppList/v1/?access_token={access_token}&have_description_language=english&last_appid={last_appid}&max_results={max_results}"
     
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url, params=params)
+            response = await client.get(url)
             response.raise_for_status()
             return response.json()
     except Exception as e:
