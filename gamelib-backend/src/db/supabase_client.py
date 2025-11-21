@@ -1,14 +1,13 @@
+"""
+Supabase client configuration
+Centralized Supabase client instance for the entire application
+"""
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import os
-from pathlib import Path
+<<<<<<< Updated upstream
 
-# Get the directory where this file is located
-current_dir = Path(__file__).resolve().parent
-# Go up to src directory and load .env from there
-env_path = current_dir.parent / '.env'
-load_dotenv(dotenv_path=env_path)
-
+load_dotenv()
 url = os.getenv("SUPABASE_URL")
 key = os.getenv("SUPABASE_KEY")
 if url is None:
@@ -17,24 +16,21 @@ if key is None:
     raise ValueError("SUPABASE_KEY environment variable is required")
 #assert url is not None and key is not None, "SUPABASE_URL and SUPABASE_KEY must be set"
 supabase: Client = create_client(url, key)
+=======
+from pathlib import Path
 
-def get_user(user_id: str):
-    response = supabase.table('users').select('*').eq('id', user_id).execute()
-    return response.data
+# Load environment variables
+current_dir = Path(__file__).resolve().parent
+env_path = current_dir.parent / '.env'
+load_dotenv(dotenv_path=env_path)
 
-def create_user(email: str, password: str):
-    response = supabase.table('users').insert({'email': email, 'password': password}).execute()
-    return response.data
+# Get Supabase credentials
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+>>>>>>> Stashed changes
 
-def update_user(user_id, email = None, password = None):
-    data = {}
-    if email:
-        data['email'] = email
-    if password:
-        data['password'] = password
-    response = supabase.table('users').update(data).eq('id', user_id).execute()
-    return response.data
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("SUPABASE_URL and SUPABASE_KEY environment variables are required")
 
-def delete_user(user_id: str):
-    response = supabase.table('users').delete().eq('id', user_id).execute()
-    return response.data
+# Create single Supabase client instance
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)

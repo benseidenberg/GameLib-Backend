@@ -1,71 +1,178 @@
 # GameLib Backend
 
-This project is a backend application built using FastAPI and Supabase to manage a user database and handle requests for the GameLib website.
+A FastAPI-based backend service for Steam game recommendations, filtering, and user management with AI-powered features.
 
-## Project Structure
+## Architecture
+
+The backend follows a clean layered architecture pattern:
 
 ```
-gamelib-backend
-├── src
-│   ├── main.py               # Entry point of the FastAPI application
-│   ├── api                   # Contains API route definitions
-│   │   ├── __init__.py       # Marks the api directory as a package
-│   │   └── users.py          # User-related API endpoints
-│   ├── db                    # Database interaction layer
-│   │   ├── __init__.py       # Marks the db directory as a package
-│   │   └── supabase_client.py # Supabase client initialization
-│   ├── models                # Data models
-│   │   ├── __init__.py       # Marks the models directory as a package
-│   │   └── user.py           # User model definition
-│   └── schemas               # Data validation schemas
-│       ├── __init__.py       # Marks the schemas directory as a package
-│       └── user_schema.py     # User data validation schemas
-├── requirements.txt           # Project dependencies
-├── README.md                  # Project documentation
-└── .env                       # Environment variables
+src/
+├── api/               # API route handlers (FastAPI endpoints)
+├── services/          # Business logic layer
+├── db/
+│   ├── repositories/  # Database access layer
+│   └── scrapers/      # Data collection scripts
+├── schemas/           # Pydantic models & data operations
+└── models/            # Domain models
 ```
 
-## Setup Instructions
+### Design Principles
 
-1. Clone the repository:
-   ```
-   git clone <repository-url>
-   cd gamelib-backend
-   ```
+- **Repository Pattern**: All database access goes through repository classes
+- **Service Layer**: Business logic is centralized in service classes
+- **Schema Classes**: Pydantic models with static operation methods
+- **Single Responsibility**: Each module has one clear purpose
+- **No Redundancy**: One source of truth for each functionality
 
-2. Create a virtual environment:
-   ```
-   python -m venv venv
-   source venv/bin/activate  # On Windows use `venv\Scripts\activate`
-   ```
+## Features
 
-3. Install the required dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
+### Game Recommendations
+- **Collaborative Filtering**: User-based recommendations with similar player analysis
+- **Cluster Recommendations**: Steam-based clustering for discovering similar games
+- **Content Filtering**: Advanced filtering by genre, tags, price, platforms, and more
+- **Content Safety**: Automatic filtering of inappropriate content
 
-4. Create a `.env` file in the root directory and add your Supabase URL and API keys:
-   ```
-   SUPABASE_URL=<your-supabase-url>
-   SUPABASE_KEY=<your-supabase-key>
-   ```
+### User Management
+- Steam profile integration
+- Game library tracking
+- Play statistics and preferences
+- Login tracking
 
-5. Run the FastAPI application:
-   ```
-   uvicorn src.main:app --reload
-   ```
+### Game Database
+- 100,000+ Steam games
+- Comprehensive metadata (genres, tags, categories, platforms)
+- Price information
+- Review scores
+- Content descriptors
 
 ## API Endpoints
 
-- **User Creation**: `POST /users`
-- **User Retrieval**: `GET /users/{id}`
-- **User Update**: `PUT /users/{id}`
-- **User Deletion**: `DELETE /users/{id}`
+### Authentication & Users
+- `POST /api/auth/steam-login` - Steam OAuth login
+- `GET /api/users/{steam_id}` - Get user data
+- `POST /api/users/` - Create new user
+- `PUT /api/users/{steam_id}` - Update user
+- `GET /api/users/{steam_id}/name` - Get user's Steam name
 
-## Usage
+### Recommendations
+- `GET /api/collaborative-recommendations/{steam_id}/` - Collaborative filtering recommendations
+- `GET /api/clusters/{steam_id}` - Cluster-based recommendations
+- `GET /api/recommendations/clusters/{steam_id}` - Detailed cluster recommendations
 
-You can interact with the API using tools like Postman or cURL. Make sure to replace `{id}` with the actual user ID when making requests.
+### Games
+- `GET /api/steam/game-details/{game_id}` - Get game details
+- `GET /api/tags` - Get available filter tags
+
+### Steam Integration
+- `GET /api/steam/profile/{steam_id}` - Get Steam profile and games
+- `GET /api/steam/player/{steam_id}` - Get Steam player summary
+
+## Tech Stack
+
+- **FastAPI** - Modern async web framework
+- **Supabase** - PostgreSQL database with real-time capabilities
+- **Pydantic** - Data validation and serialization
+- **httpx** - Async HTTP client for Steam API
+- **scikit-learn** - Machine learning for recommendations
+- **pandas & numpy** - Data processing
+- **OpenAI** - AI chatbot integration
+
+## Setup
+
+### Prerequisites
+- Python 3.8+
+- Steam Web API Key
+- Supabase project
+
+### Installation
+
+1. Clone the repository
+2. Create virtual environment:
+   ```bash
+   python -m venv .venv
+   .venv\Scripts\activate
+   ```
+
+3. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. Create `.env` file:
+   ```env
+   STEAM_API_KEY=your_steam_api_key
+   SUPABASE_URL=your_supabase_url
+   SUPABASE_KEY=your_supabase_key
+   OPENAI_API_KEY=your_openai_key
+   ```
+
+5. Run the server:
+   ```bash
+   uvicorn src.main:app --reload
+   ```
+
+The API will be available at `http://localhost:8000`
+
+## Database Schema
+
+### users
+- `steam_id` (bigint, PK) - Steam user ID
+- `data` (jsonb) - Steam profile data
+- `games` (jsonb) - User's game library
+- `games_array` (text[]) - Sorted game IDs by playtime
+- `login_count` (int) - Number of logins
+
+### games_db
+- `game_id` (bigint, PK) - Steam app ID
+- `name` (text) - Game title
+- `short_desc` (text) - Short description
+- `detailed_desc` (text) - Full description
+- `image` (text) - Header image URL
+- `price` (text) - Formatted price
+- `price_usd` (float) - Price in USD
+- `genres` (text[]) - Game genres
+- `categories` (text[]) - Game categories
+- `tags` (text[]) - User-defined tags
+- `platforms` (jsonb) - Platform availability
+- `developers` (text[]) - Developer names
+- `publishers` (text[]) - Publisher names
+- `release_date` (date) - Release date
+- `positive` (int) - Positive reviews
+- `negative` (int) - Negative reviews
+- `steam_url` (text) - Steam store URL
+- `content` (jsonb) - Content descriptors
+- `required_age` (int) - Age rating
+
+## Development
+
+### Project Structure
+
+See folder-specific READMEs for details:
+- [API Documentation](src/api/README.md)
+- [Services Documentation](src/services/README.md)
+- [Schemas Documentation](src/schemas/README.md)
+- [Repositories Documentation](src/db/repositories/README.md)
+
+### Code Style
+- Follow PEP 8 guidelines
+- Use type hints
+- Document functions with docstrings
+- Keep functions focused and single-purpose
+
+### Testing
+Run tests with:
+```bash
+pytest
+```
+
+## Contributing
+
+1. Create a feature branch
+2. Make your changes following the architecture patterns
+3. Add tests for new functionality
+4. Submit a pull request
 
 ## License
 
-This project is licensed under the MIT License.
+MIT License
