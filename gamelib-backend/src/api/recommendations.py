@@ -1,15 +1,41 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 from src.recommender.recommender import get_game_clusters
 import os
 import httpx
 import asyncio
+import openai
+import pandas as pd
+from typing import Optional, List, Dict, Any
+import re
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import json
+from datasets import load_dataset
 
 # Get Steam API key from environment variables (loaded in main.py)
 STEAM_API_KEY = os.getenv("STEAM_API_KEY")
 if not STEAM_API_KEY:
     raise ValueError("STEAM_API_KEY environment variable is required")
 
+# Get OpenAI API key from environment variables
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY environment variable is required")
+
+# Initialize OpenAI client
+openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+# Pydantic model for AI recommendation request
+class AIRecommendationRequest(BaseModel):
+    prompt: str
+
 router = APIRouter()
+
+# Global variable to cache the dataset
+_steam_dataset = None
+_dataset_loaded = False
 
 
 async def get_steam_app_details(app_id: int):
@@ -465,3 +491,410 @@ async def test_recommendations(steam_id: int):
     except Exception as e:
         print(f"DEBUG: Error in test_recommendations: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error getting test recommendations: {str(e)}")
+
+
+async def load_steam_dataset():
+    """
+    Load the Steam games dataset from Hugging Face
+    """
+    global _steam_dataset, _dataset_loaded
+    
+    if _dataset_loaded:
+        return _steam_dataset
+    
+    try:
+        print("DEBUG: Loading Steam games dataset from Hugging Face...")
+        # Load the Steam games dataset
+        dataset = load_dataset("FronkonGames/steam-games-dataset", split="train")
+        
+        # Convert to pandas DataFrame for easier manipulation
+        _steam_dataset = pd.DataFrame(dataset)
+        
+        # Clean and prepare the dataset
+        # Remove games without descriptions or names
+        _steam_dataset = _steam_dataset.dropna(subset=['description', 'name'])
+        
+        # Create a combined text field for similarity matching
+        _steam_dataset['combined_text'] = (
+            _steam_dataset['name'].astype(str) + " " + 
+            _steam_dataset['description'].astype(str) + " " + 
+            _steam_dataset.get('genres', '').astype(str) + " " + 
+            _steam_dataset.get('tags', '').astype(str)
+        )
+        
+        _dataset_loaded = True
+        print(f"DEBUG: Successfully loaded {len(_steam_dataset)} games from dataset")
+        
+        return _steam_dataset
+        
+    except Exception as e:
+        print(f"DEBUG: Error loading Steam dataset: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error loading game dataset: {str(e)}")
+
+
+async def analyze_prompt_with_ai(prompt: str) -> Dict[str, Any]:
+    """
+    Use OpenAI to analyze the user's prompt and extract preferences
+    """
+    try:
+        system_prompt = """
+        You are a gaming assistant that analyzes user prompts to understand their game preferences.
+        
+        Extract the following information from the user's prompt:
+        1. Game genres they're interested in
+        2. Gameplay elements they want (multiplayer, story-driven, action, puzzle, etc.)
+        3. Setting/theme preferences (fantasy, sci-fi, historical, modern, etc.)
+        4. Price preferences (if mentioned - free, under $X, budget, premium, etc.)
+        5. Platform preferences (if mentioned)
+        6. Similar games they mention
+        7. Mood/feeling they want (relaxing, challenging, competitive, etc.)
+        
+        Return your analysis as JSON with these keys:
+        - genres: list of genres
+        - gameplay_elements: list of gameplay types
+        - themes: list of themes/settings
+        - price_preference: string describing budget constraints
+        - similar_games: list of mentioned games
+        - mood: list of desired moods/feelings
+        - summary: brief summary of what they're looking for
+        
+        Be concise and only extract information that's clearly mentioned or strongly implied.
+        """
+        
+        response = await openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=500,
+            temperature=0.3
+        )
+        
+        # Parse the JSON response
+        analysis_text = response.choices[0].message.content
+        
+        # Try to extract JSON from the response
+        try:
+            # Look for JSON in the response
+            json_start = analysis_text.find('{')
+            json_end = analysis_text.rfind('}') + 1
+            if json_start != -1 and json_end != 0:
+                analysis = json.loads(analysis_text[json_start:json_end])
+            else:
+                # Fallback: create a basic structure
+                analysis = {
+                    "genres": [],
+                    "gameplay_elements": [],
+                    "themes": [],
+                    "price_preference": "",
+                    "similar_games": [],
+                    "mood": [],
+                    "summary": analysis_text
+                }
+        except json.JSONDecodeError:
+            # If JSON parsing fails, create a fallback analysis
+            analysis = {
+                "genres": [],
+                "gameplay_elements": [],
+                "themes": [],
+                "price_preference": "",
+                "similar_games": [],
+                "mood": [],
+                "summary": analysis_text
+            }
+        
+        return analysis
+        
+    except Exception as e:
+        print(f"DEBUG: Error in AI analysis: {str(e)}")
+        # Return a basic fallback analysis
+        return {
+            "genres": [],
+            "gameplay_elements": [],
+            "themes": [],
+            "price_preference": "",
+            "similar_games": [],
+            "mood": [],
+            "summary": prompt
+        }
+
+
+def extract_price_preference(prompt: str, ai_analysis: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract price preferences from the prompt and AI analysis
+    """
+    price_info = {
+        "max_price": None,
+        "free_only": False,
+        "budget_conscious": False,
+        "preference_text": ""
+    }
+    
+    prompt_lower = prompt.lower()
+    
+    # Check for free games preference
+    if any(keyword in prompt_lower for keyword in ['free', 'f2p', 'free to play', 'no cost']):
+        price_info["free_only"] = True
+        price_info["preference_text"] = "free games"
+    
+    # Check for budget mentions
+    budget_keywords = ['cheap', 'budget', 'affordable', 'inexpensive', 'low cost']
+    if any(keyword in prompt_lower for keyword in budget_keywords):
+        price_info["budget_conscious"] = True
+        price_info["preference_text"] = "budget-friendly games"
+    
+    # Look for specific price mentions ($X, under $X, etc.)
+    price_patterns = [
+        r'under \$(\d+)',
+        r'less than \$(\d+)',
+        r'below \$(\d+)',
+        r'maximum \$(\d+)',
+        r'max \$(\d+)',
+        r'\$(\d+) or less',
+        r'budget of \$(\d+)'
+    ]
+    
+    for pattern in price_patterns:
+        match = re.search(pattern, prompt_lower)
+        if match:
+            price_info["max_price"] = int(match.group(1))
+            price_info["preference_text"] = f"under ${price_info['max_price']}"
+            break
+    
+    # Also check AI analysis for price preferences
+    ai_price = ai_analysis.get("price_preference", "")
+    if ai_price and not price_info["preference_text"]:
+        price_info["preference_text"] = ai_price
+    
+    return price_info
+
+
+async def find_similar_games(ai_analysis: Dict[str, Any], price_info: Dict[str, Any], limit: int = 5) -> List[Dict[str, Any]]:
+    """
+    Find games similar to the user's preferences using the dataset
+    """
+    try:
+        dataset = await load_steam_dataset()
+        
+        if dataset is None or dataset.empty:
+            return []
+        
+        # Create search query from AI analysis
+        search_terms = []
+        
+        # Add genres
+        search_terms.extend(ai_analysis.get("genres", []))
+        
+        # Add gameplay elements
+        search_terms.extend(ai_analysis.get("gameplay_elements", []))
+        
+        # Add themes
+        search_terms.extend(ai_analysis.get("themes", []))
+        
+        # Add mood descriptors
+        search_terms.extend(ai_analysis.get("mood", []))
+        
+        # Create the search query
+        search_query = " ".join(search_terms)
+        
+        if not search_query.strip():
+            # Fallback to using the summary if no specific terms found
+            search_query = ai_analysis.get("summary", "")
+        
+        print(f"DEBUG: Search query: {search_query}")
+        
+        # Use TF-IDF to find similar games
+        if 'combined_text' not in dataset.columns:
+            print("DEBUG: combined_text column missing, recreating...")
+            dataset['combined_text'] = (
+                dataset['name'].astype(str) + " " + 
+                dataset['description'].astype(str)
+            )
+        
+        # Create TF-IDF vectors
+        vectorizer = TfidfVectorizer(
+            max_features=5000,
+            stop_words='english',
+            ngram_range=(1, 2),
+            min_df=2
+        )
+        
+        # Fit on the game descriptions and transform
+        tfidf_matrix = vectorizer.fit_transform(dataset['combined_text'].fillna(''))
+        
+        # Transform the search query
+        query_vector = vectorizer.transform([search_query])
+        
+        # Calculate cosine similarity
+        similarities = cosine_similarity(query_vector, tfidf_matrix).flatten()
+        
+        # Get top similar games
+        top_indices = similarities.argsort()[-limit*3:][::-1]  # Get more than needed to allow for filtering
+        
+        # Filter and prepare results
+        results = []
+        for idx in top_indices:
+            if len(results) >= limit:
+                break
+                
+            game = dataset.iloc[idx]
+            similarity_score = similarities[idx]
+            
+            # Skip if similarity is too low
+            if similarity_score < 0.1:
+                continue
+            
+            # Extract game information
+            game_info = {
+                "name": str(game.get('name', 'Unknown')),
+                "description": str(game.get('description', '')),
+                "genres": str(game.get('genres', '')),
+                "tags": str(game.get('tags', '')),
+                "similarity_score": float(similarity_score),
+                "price": str(game.get('price', 'N/A')),
+                "steam_appid": game.get('steam_appid', None)
+            }
+            
+            # Apply price filtering if specified
+            if price_info.get("free_only"):
+                price_str = str(game.get('price', '')).lower()
+                if 'free' not in price_str and '0' not in price_str:
+                    continue
+            
+            if price_info.get("max_price"):
+                price_str = str(game.get('price', ''))
+                # Try to extract numeric price
+                price_match = re.search(r'\$?(\d+\.?\d*)', price_str)
+                if price_match:
+                    try:
+                        price_value = float(price_match.group(1))
+                        if price_value > price_info["max_price"]:
+                            continue
+                    except ValueError:
+                        pass
+            
+            results.append(game_info)
+        
+        print(f"DEBUG: Found {len(results)} similar games")
+        return results
+        
+    except Exception as e:
+        print(f"DEBUG: Error finding similar games: {str(e)}")
+        return []
+
+
+@router.post("/recommendations/ai")
+async def get_ai_recommendations(request: AIRecommendationRequest):
+    """
+    Get AI-powered game recommendations based on a text prompt.
+    Uses OpenAI to analyze the prompt and the Steam games dataset to find similar games.
+    """
+    try:
+        prompt = request.prompt.strip()
+        
+        # Validate prompt
+        if not prompt:
+            raise HTTPException(status_code=400, detail="Prompt cannot be empty")
+        
+        print(f"DEBUG: AI recommendations requested with prompt: {prompt[:100]}...")
+        
+        # Step 1: Analyze the prompt with OpenAI
+        ai_analysis = await analyze_prompt_with_ai(prompt)
+        print(f"DEBUG: AI Analysis: {ai_analysis}")
+        
+        # Step 2: Extract price preferences
+        price_info = extract_price_preference(prompt, ai_analysis)
+        print(f"DEBUG: Price preferences: {price_info}")
+        
+        # Step 3: Find similar games using the dataset
+        similar_games = await find_similar_games(ai_analysis, price_info, limit=5)
+        
+        # Step 4: Enhance results with Steam API data if possible
+        enhanced_games = []
+        for game in similar_games:
+            enhanced_game = game.copy()
+            
+            # Ensure steam_appid is always included in the response
+            enhanced_game["app_id"] = game.get('steam_appid', None)
+            
+            # Try to get additional info from Steam API if we have an app_id
+            steam_appid = game.get('steam_appid')
+            if steam_appid and str(steam_appid).isdigit():
+                try:
+                    steam_info = await get_steam_app_details(int(steam_appid))
+                    if steam_info:
+                        # Merge Steam API data with dataset data
+                        enhanced_game.update({
+                            "steam_title": steam_info.get("title"),
+                            "steam_description": steam_info.get("description"),
+                            "steam_image": steam_info.get("image"),
+                            "steam_price": steam_info.get("price"),
+                            "steam_genres": steam_info.get("genres", []),
+                            "steam_url": steam_info.get("steam_url"),
+                            "developers": steam_info.get("developers", []),
+                            "publishers": steam_info.get("publishers", []),
+                            "app_id": steam_appid  # Ensure app_id is set from Steam API too
+                        })
+                except Exception as e:
+                    print(f"DEBUG: Error fetching Steam data for {steam_appid}: {str(e)}")
+            
+            enhanced_games.append(enhanced_game)
+        
+        # Step 5: Generate explanation using AI
+        explanation = await generate_recommendation_explanation(prompt, ai_analysis, enhanced_games)
+        
+        return {
+            "message": "AI recommendations generated successfully",
+            "prompt": prompt,
+            "analysis": {
+                "preferences": ai_analysis,
+                "price_constraints": price_info
+            },
+            "explanation": explanation,
+            "total_games": len(enhanced_games),
+            "recommendations": enhanced_games
+        }
+        
+    except Exception as e:
+        print(f"DEBUG: Error in get_ai_recommendations: {str(e)}")
+        import traceback
+        print(f"DEBUG: Full traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Error getting AI recommendations: {str(e)}")
+
+
+async def generate_recommendation_explanation(prompt: str, analysis: Dict[str, Any], games: List[Dict[str, Any]]) -> str:
+    """
+    Generate an explanation for why these games were recommended
+    """
+    try:
+        game_names = [game.get('name', game.get('steam_title', 'Unknown')) for game in games[:3]]
+        
+        explanation_prompt = f"""
+        Based on the user's request: "{prompt}"
+        
+        And the analysis that they want: {analysis.get('summary', '')}
+        
+        I recommended these games: {', '.join(game_names)}
+        
+        Write a brief, friendly explanation (2-3 sentences) of why these games are perfect for what they're looking for.
+        Focus ONLY on the positive aspects and features that match their preferences.
+        Do not mention what the games lack or don't have - only highlight what makes them great matches.
+        Use enthusiastic, positive language about what these games DO offer.
+        """
+        
+        response = await openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are an enthusiastic gaming assistant. Provide brief, friendly explanations for game recommendations. Focus ONLY on positive aspects - never mention what games lack or don't have. Highlight what makes each recommendation exciting and perfect for the user's needs."},
+                {"role": "user", "content": explanation_prompt}
+            ],
+            max_tokens=150,
+            temperature=0.7
+        )
+        
+        return response.choices[0].message.content.strip()
+        
+    except Exception as e:
+        print(f"DEBUG: Error generating explanation: {str(e)}")
+        return f"I found these games based on your interest in {analysis.get('summary', 'games matching your description')}."
