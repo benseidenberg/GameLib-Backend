@@ -3,6 +3,7 @@ STEAM_API_KEY="968317D323A2D4C8ED61E3D9F5E2FAB1"
 import pandas as pd
 import json
 import datetime
+import asyncio
 from collections import Counter
 from typing import List, Dict, Set, Tuple
 from src.db.supabase_client import supabase
@@ -25,8 +26,8 @@ async def get_game_clusters(steam_id: int):
 async def get_collaborative_recommendations(
     steam_id: int, 
     top_n_games: int = 5,
-    min_playtime: int = 60,
-    max_similar_users: int = 10,
+    min_playtime: int = 600,
+    max_similar_users: int = 999999,
     max_recommendations: int = 20
 ) -> Dict:
     """
@@ -89,47 +90,114 @@ async def get_collaborative_recommendations(
         
         print(f"User's top {top_n_games} games: {user_top_games}")
         
-        # 3. Find similar users who own any of the top games
-        # Get all users from database (excluding current user)
-        all_users_response = supabase.table('users').select('steam_id, games').neq('steam_id', steam_id).execute()
+        # Convert to set once for faster lookups
+        user_top_games_set = set(user_top_games)
         
-        if not all_users_response.data:
-            return {
-                "error": "No other users found in database",
-                "recommendations": [],
-                "similar_users": [],
-                "user_top_games": user_top_games
-            }
+        # Use max_similar_users as the early stop threshold (with some buffer for better results)
+        # If max_similar_users is very large (no practical limit), increase max_users_to_process
+        early_stop_threshold = max_similar_users
         
-        # 4. Calculate similarity scores for each user
+        # Adjust processing limits based on requested similar users
+        if max_similar_users > 50000:
+            # "No limit" case - process all available users
+            max_users_to_process = 999999999  # Essentially unlimited
+        elif max_similar_users > 10000:
+            max_users_to_process = 100000
+        else:
+            max_users_to_process = max(20000, max_similar_users * 2)
+        
+        # 3. Find similar users using CONCURRENT PAGINATION for speed
+        print(f"Starting concurrent batch processing (early stop at {early_stop_threshold} similar users)...")
+        
         similar_users = []
-        for other_user in all_users_response.data:
-            other_steam_id = other_user.get('steam_id')
-            other_games = other_user.get('games', {})
-            
-            if not other_games:
-                continue
-            
-            # Get other user's game appids
-            other_game_ids = set(int(appid) for appid in other_games.keys())
-            
-            # Calculate overlap with user's top games
-            overlap = len(set(user_top_games) & other_game_ids)
-            
-            if overlap > 0:
-                # Calculate similarity score based on:
-                # 1. Number of matching top games
-                # 2. Total games in common
-                total_overlap = len(user_owned_games & other_game_ids)
-                similarity_score = overlap * 10 + total_overlap  # Weight top games higher
+        batch_size = 500
+        concurrent_batches = 5  # Number of batches to fetch simultaneously
+        
+        async def fetch_and_process_batch(offset: int):
+            """Fetch and process a single batch of users"""
+            try:
+                batch_response = supabase.table('users').select('steam_id, games').neq('steam_id', steam_id).range(offset, offset + batch_size - 1).limit(batch_size).execute()
                 
-                similar_users.append({
-                    "steam_id": other_steam_id,
-                    "similarity_score": similarity_score,
-                    "top_games_overlap": overlap,
-                    "total_games_overlap": total_overlap,
-                    "games": other_game_ids
-                })
+                batch_users = []
+                batch_count = len(batch_response.data) if batch_response.data else 0
+                
+                if batch_count == 0:
+                    return batch_users, batch_count
+                
+                # Process users in this batch
+                for other_user in batch_response.data:
+                    other_steam_id = other_user.get('steam_id')
+                    other_games = other_user.get('games', {})
+                    
+                    if not other_games:
+                        continue
+                    
+                    # Quick check: convert keys to set of ints
+                    try:
+                        other_game_ids = set(int(appid) for appid in other_games.keys())
+                    except (ValueError, TypeError):
+                        continue
+                    
+                    # Fast intersection using set operations
+                    overlap_count = len(user_top_games_set & other_game_ids)
+                    
+                    # Skip users with no overlap
+                    if overlap_count == 0:
+                        continue
+                    
+                    # Calculate total overlap only if top games match
+                    total_overlap = len(user_owned_games & other_game_ids)
+                    similarity_score = overlap_count * 10 + total_overlap
+                    
+                    batch_users.append({
+                        "steam_id": other_steam_id,
+                        "similarity_score": similarity_score,
+                        "top_games_overlap": overlap_count,
+                        "total_games_overlap": total_overlap,
+                        "games": other_game_ids
+                    })
+                
+                return batch_users, batch_count
+            except Exception as e:
+                print(f"Error fetching batch at offset {offset}: {e}")
+                return [], 0
+        
+        # Process batches concurrently
+        offset = 0
+        total_users_processed = 0
+        
+        while offset < max_users_to_process:
+            # Early stopping check
+            if len(similar_users) >= early_stop_threshold:
+                print(f"Early stopping: found {len(similar_users)} similar users (threshold: {early_stop_threshold})")
+                break
+            
+            # Create tasks for concurrent batch fetching
+            batch_offsets = [offset + (i * batch_size) for i in range(concurrent_batches)]
+            tasks = [fetch_and_process_batch(batch_offset) for batch_offset in batch_offsets]
+            
+            # Fetch all batches concurrently
+            results = await asyncio.gather(*tasks)
+            
+            # Aggregate results from all batches
+            batches_processed = 0
+            for batch_users, batch_count in results:
+                if batch_count > 0:
+                    similar_users.extend(batch_users)
+                    total_users_processed += batch_count
+                    batches_processed += 1
+            
+            print(f"Processed {batches_processed} batches concurrently (offsets {offset}-{offset + concurrent_batches * batch_size}): {total_users_processed} total users, {len(similar_users)} similar users found")
+            
+            # If we didn't get a full set of batches, we've reached the end
+            if batches_processed < concurrent_batches:
+                print(f"Reached end of user table")
+                break
+            
+            # Move offset forward by the number of batches processed
+            offset += concurrent_batches * batch_size
+        
+        print(f"Finished processing {total_users_processed} users, found {len(similar_users)} similar users")
         
         # Sort by similarity score and take top N
         similar_users.sort(key=lambda x: x["similarity_score"], reverse=True)
@@ -192,7 +260,7 @@ async def get_collaborative_recommendations(
             "recommendations": recommendations_list,
             "similar_users": similar_users_summary,
             "user_top_games": user_top_games,
-            "total_users_analyzed": len(all_users_response.data),
+            "total_users_analyzed": total_users_processed,
             "similar_users_found": len(top_similar_users)
         }
         
@@ -208,5 +276,4 @@ async def get_collaborative_recommendations(
         }
 
 
-#https://api.steampowered.com/IStoreAppSimilarityService/IdentifyClustersFromPlaytime/v1/?access_token=eyAidHlwIjogIkpXVCIsICJhbGciOiAiRWREU0EiIH0.eyAiaXNzIjogInI6MDAwMl8yNkZDQzNFRl9ENTEyNSIsICJzdWIiOiAiNzY1NjExOTg5ODA2NjA2MjciLCAiYXVkIjogWyAid2ViOmNvbW11bml0eSIgXSwgImV4cCI6IDE3NTkyNjAxMDEsICJuYmYiOiAxNzUwNTMyNjM0LCAiaWF0IjogMTc1OTE3MjYzNCwgImp0aSI6ICIwMDE5XzI2RkNDM0U0XzkxMzVGIiwgIm9hdCI6IDE3NTkxNzI2MzQsICJydF9leHAiOiAxNzc3MTI4MTA2LCAicGVyIjogMCwgImlwX3N1YmplY3QiOiAiMTQwLjIzMi4xNzcuMTQ2IiwgImlwX2NvbmZpcm1lciI6ICIxNDAuMjMyLjE2My4yOCIgfQ.Ob602cgjEiiOESorPFGJg9DPfsdFCI8_7m5-uti9ipT9EYxnMmqyjvVqhIZ5KQPgLVXuzreGdE4ZD-wHkbVuCg&steamid=76561198980660627
 
