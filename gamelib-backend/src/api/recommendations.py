@@ -677,6 +677,7 @@ def validate_and_sanitize_analysis(analysis: Dict[str, Any], original_prompt: st
         "price_preference": analysis.get("price_preference", ""),
         "similar_games": analysis.get("similar_games", []),
         "mood": analysis.get("mood", []),
+        "popularity_preference": analysis.get("popularity_preference", "popular"),  # Default to popular
         "summary": analysis.get("summary", ""),
         "redirect_message": analysis.get("redirect_message", "")
     }
@@ -700,6 +701,7 @@ def validate_and_sanitize_analysis(analysis: Dict[str, Any], original_prompt: st
             "price_preference": "",
             "similar_games": [],
             "mood": ["relaxing", "wholesome"],
+            "popularity_preference": "popular",
             "summary": "games with themes related to your interests",
             "redirect_message": "I can't fulfill that specific request, but I can recommend games related to your interests!"
         }
@@ -710,9 +712,13 @@ def validate_and_sanitize_analysis(analysis: Dict[str, Any], original_prompt: st
             sanitized[key] = []
     
     # Ensure strings are strings
-    for key in ["price_preference", "summary", "redirect_message"]:
+    for key in ["price_preference", "summary", "redirect_message", "popularity_preference"]:
         if not isinstance(sanitized[key], str):
             sanitized[key] = ""
+    
+    # Validate popularity preference
+    if sanitized["popularity_preference"] not in ["popular", "niche", "any"]:
+        sanitized["popularity_preference"] = "popular"  # Default to popular
     
     return sanitized
 
@@ -737,6 +743,9 @@ EXAMPLES:
 - "I love cats" → Find games featuring cats, pet simulation, or animal-themed games  
 - "I'm sad" → Find uplifting, comforting, or mood-boosting games
 - "Tell me a joke" → Find funny, humorous, or comedy games
+- "Give me a niche RPG" → Find lesser-known, indie RPG games with fewer reviews
+- "Popular action games" → Find well-known action games with many reviews
+- "Hidden gem platformers" → Find obscure, high-quality platformer games
 
 OUTPUT FORMAT (always return valid JSON):
 {
@@ -746,6 +755,7 @@ OUTPUT FORMAT (always return valid JSON):
   "price_preference": "preference description",
   "similar_games": ["game1", "game2"],
   "mood": ["mood1", "mood2"],
+  "popularity_preference": "popular/niche/any (defaults to popular)",
   "summary": "brief explanation connecting their interest to gaming",
   "redirect_message": "friendly message if redirecting non-gaming input to games"
 }
@@ -786,6 +796,7 @@ Return only valid JSON with the gaming preference analysis."""
                     "price_preference": "",
                     "similar_games": [],
                     "mood": [],
+                    "popularity_preference": "popular",
                     "summary": analysis_text,
                     "redirect_message": ""
                 }
@@ -798,6 +809,7 @@ Return only valid JSON with the gaming preference analysis."""
                 "price_preference": "",
                 "similar_games": [],
                 "mood": [],
+                "popularity_preference": "popular",
                 "summary": analysis_text,
                 "redirect_message": ""
             }
@@ -816,6 +828,7 @@ Return only valid JSON with the gaming preference analysis."""
             "price_preference": "",
             "similar_games": [],
             "mood": [],
+            "popularity_preference": "popular",
             "summary": prompt,
             "redirect_message": ""
         }
@@ -935,9 +948,91 @@ async def get_user_owned_games(steam_id: int) -> List[int]:
         return []
 
 
-async def find_similar_games(ai_analysis: Dict[str, Any], price_info: Dict[str, Any], limit: int = 5, owned_games: List[int] = None) -> List[Dict[str, Any]]:
+def extract_popularity_preference(prompt: str, ai_analysis: Dict[str, Any]) -> str:
     """
-    Find games similar to the user's preferences using the dataset
+    Extract popularity preference from prompt
+    """
+    prompt_lower = prompt.lower()
+    
+    # Check for popularity indicators
+    niche_keywords = ['niche', 'hidden gem', 'indie', 'unknown', 'small', 'underground', 'obscure']
+    popular_keywords = ['popular', 'mainstream', 'well-known', 'famous', 'big', 'major', 'blockbuster']
+    
+    for keyword in niche_keywords:
+        if keyword in prompt_lower:
+            return "niche"
+    
+    for keyword in popular_keywords:
+        if keyword in prompt_lower:
+            return "popular"
+    
+    return "popular"  # Default to popular instead of any
+
+
+def calculate_game_score(game, similarity_score: float, popularity_pref: str) -> float:
+    """
+    Calculate a comprehensive score for game ranking
+    Prioritizes relevance but considers ratings and popularity
+    """
+    # Start with similarity score (0-1)
+    score = similarity_score * 100  # Convert to 0-100 scale
+    
+    # Get ratings data
+    positive = safe_convert_value(game.get('Positive', 0), int, 0)
+    negative = safe_convert_value(game.get('Negative', 0), int, 0)
+    total_reviews = positive + negative
+    
+    # Calculate rating percentage
+    rating_percentage = 0
+    if total_reviews > 0:
+        rating_percentage = (positive / total_reviews) * 100
+    
+    # Rating bonus (scaled by relevance importance)
+    if rating_percentage >= 95:
+        rating_bonus = 15
+    elif rating_percentage >= 90:
+        rating_bonus = 12
+    elif rating_percentage >= 85:
+        rating_bonus = 8
+    elif rating_percentage >= 80:
+        rating_bonus = 5
+    elif rating_percentage >= 75:
+        rating_bonus = 2
+    else:
+        rating_bonus = 0
+    
+    # Apply rating bonus (but don't let it override poor relevance)
+    if similarity_score > 0.15:  # Only apply if reasonably relevant
+        score += rating_bonus
+    
+    # Popularity adjustment based on preference
+    if popularity_pref == "niche":
+        # Prefer games with fewer reviews (niche)
+        if total_reviews < 100:
+            score += 10
+        elif total_reviews < 500:
+            score += 5
+        elif total_reviews > 5000:
+            score -= 5
+    elif popularity_pref == "popular":
+        # Prefer games with more reviews (popular)
+        if total_reviews > 5000:
+            score += 10
+        elif total_reviews > 1000:
+            score += 5
+        elif total_reviews < 100:
+            score -= 5
+    
+    # Minimum review count bonus for reliability (small boost)
+    if total_reviews >= 50:
+        score += 2
+    
+    return score
+
+
+async def find_similar_games(ai_analysis: Dict[str, Any], price_info: Dict[str, Any], limit: int = 5, owned_games: List[int] = None, original_prompt: str = "") -> List[Dict[str, Any]]:
+    """
+    Find games similar to the user's preferences using enhanced matching
     """
     try:
         dataset = await load_steam_dataset()
@@ -945,48 +1040,66 @@ async def find_similar_games(ai_analysis: Dict[str, Any], price_info: Dict[str, 
         if dataset is None or dataset.empty:
             return []
         
-        # Create search query from AI analysis
+        # Get popularity preference from AI analysis
+        popularity_pref = ai_analysis.get("popularity_preference", "popular")
+        print(f"DEBUG: Popularity preference from AI: {popularity_pref}")
+        
+        # Fallback extraction if AI didn't detect it
+        if popularity_pref == "any":
+            popularity_pref = extract_popularity_preference(original_prompt, ai_analysis)
+            print(f"DEBUG: Fallback popularity preference: {popularity_pref}")
+        
+        # Create enhanced search query combining AI analysis AND original prompt keywords
         search_terms = []
         
-        # Add genres
-        search_terms.extend(ai_analysis.get("genres", []))
+        # First, add the original prompt words (cleaned up)
+        if original_prompt:
+            # Extract meaningful keywords from original prompt (remove common words)
+            import re
+            original_keywords = re.findall(r'\b\w+\b', original_prompt.lower())
+            # Filter out common stop words but keep game-specific terms
+            stop_words = {'give', 'me', 'a', 'an', 'the', 'i', 'want', 'need', 'looking', 'for', 'find', 'get', 'some'}
+            meaningful_keywords = [word for word in original_keywords if word not in stop_words and len(word) > 2]
+            search_terms.extend(meaningful_keywords)
         
-        # Add gameplay elements
-        search_terms.extend(ai_analysis.get("gameplay_elements", []))
-        
-        # Add themes
+        # Then add AI analysis terms (these help with context and associations)
         search_terms.extend(ai_analysis.get("themes", []))
-        
-        # Add mood descriptors
+        search_terms.extend(ai_analysis.get("genres", []))
+        search_terms.extend(ai_analysis.get("gameplay_elements", []))
         search_terms.extend(ai_analysis.get("mood", []))
         
         # Create the search query
         search_query = " ".join(search_terms)
         
         if not search_query.strip():
-            # Fallback to using the summary if no specific terms found
-            search_query = ai_analysis.get("summary", "")
+            # Fallback to using the summary or original prompt
+            search_query = original_prompt or ai_analysis.get("summary", "")
         
-        print(f"DEBUG: Search query: {search_query}")
+        print(f"DEBUG: Enhanced search query (original + AI): {search_query}")
         
-        # Use TF-IDF to find similar games
+        # Enhanced TF-IDF matching
         if 'combined_text' not in dataset.columns:
             print("DEBUG: combined_text column missing, recreating...")
             dataset['combined_text'] = (
-                dataset['name'].astype(str) + " " + 
-                dataset['description'].astype(str)
+                dataset['name'].fillna('').astype(str) + " " + 
+                dataset.get('About the game', dataset.get('description', '')).fillna('').astype(str) + " " +
+                dataset.get('Genres', '').fillna('').astype(str) + " " +
+                dataset.get('Tags', '').fillna('').astype(str)
             )
         
-        # Create TF-IDF vectors
+        # Create TF-IDF vectors with improved parameters for better matching
         vectorizer = TfidfVectorizer(
-            max_features=5000,
+            max_features=8000,
             stop_words='english',
-            ngram_range=(1, 2),
-            min_df=2
+            ngram_range=(1, 3),  # Include trigrams for better phrase matching
+            min_df=1,  # Allow rare terms (important for niche games)
+            max_df=0.8,  # Exclude very common terms
+            lowercase=True,
+            token_pattern=r'\b\w+\b'
         )
         
         # Fit on the game descriptions and transform
-        tfidf_matrix = vectorizer.fit_transform(dataset['combined_text'].fillna(''))
+        tfidf_matrix = vectorizer.fit_transform(dataset['combined_text'])
         
         # Transform the search query
         query_vector = vectorizer.transform([search_query])
@@ -994,36 +1107,47 @@ async def find_similar_games(ai_analysis: Dict[str, Any], price_info: Dict[str, 
         # Calculate cosine similarity
         similarities = cosine_similarity(query_vector, tfidf_matrix).flatten()
         
-        # Get top similar games
-        top_indices = similarities.argsort()[-limit*3:][::-1]  # Get more than needed to allow for filtering
-        
-        # Filter and prepare results
-        results = []
-        for idx in top_indices:
-            if len(results) >= limit:
-                break
+        # Create scored candidates
+        candidates = []
+        for idx, similarity in enumerate(similarities):
+            if similarity < 0.05:  # Skip very low relevance
+                continue
                 
             game = dataset.iloc[idx]
-            similarity_score = similarities[idx]
             
-            # Skip if similarity is too low
-            if similarity_score < 0.1:
-                continue
-            
-            # Check if user already owns this game (do this before extracting full game info)
+            # Check ownership first
             steam_appid = game.get('AppID', game.get('steam_appid', game.get('appid', game.get('app_id', None))))
             if owned_games and steam_appid:
-                # Convert to int for comparison since Steam API returns ints
                 try:
                     steam_appid_int = int(steam_appid)
                     if steam_appid_int in owned_games:
-                        print(f"DEBUG: Skipping {game.get('Name', game.get('name', game.get('title', 'Unknown')))} (app_id: {steam_appid_int}) - user already owns it")
                         continue
                 except (ValueError, TypeError):
-                    print(f"DEBUG: Could not convert app_id {steam_appid} to int for game {game.get('Name', game.get('name', game.get('title', 'Unknown')))}")
                     pass
             
-            # Extract game information using the actual column names from the dataset
+            # Calculate comprehensive score
+            total_score = calculate_game_score(game, similarity, popularity_pref)
+            
+            candidates.append({
+                'idx': idx,
+                'similarity': similarity,
+                'total_score': total_score,
+                'game': game
+            })
+        
+        # Sort by total score (relevance + ratings + popularity preference)
+        candidates.sort(key=lambda x: x['total_score'], reverse=True)
+        
+        # Extract top games with additional filtering
+        results = []
+        for candidate in candidates[:limit*2]:  # Get extra to allow for price filtering
+            if len(results) >= limit:
+                break
+                
+            game = candidate['game']
+            similarity_score = candidate['similarity']
+            
+            # Extract game information
             game_info = {
                 "name": safe_convert_value(game.get('Name', game.get('name', 'Unknown')), str, 'Unknown'),
                 "description": safe_convert_value(game.get('About the game', game.get('description', '')), str, ''),
@@ -1031,18 +1155,21 @@ async def find_similar_games(ai_analysis: Dict[str, Any], price_info: Dict[str, 
                 "tags": parse_comma_separated_string(game.get('Tags', game.get('tags', ''))),
                 "categories": parse_comma_separated_string(game.get('Categories', game.get('categories', ''))),
                 "similarity_score": float(similarity_score),
+                "total_score": candidate['total_score'],
                 "price": safe_convert_value(game.get('Price', game.get('price', 'N/A')), str, 'N/A'),
-                "steam_appid": safe_convert_value(steam_appid, int, None),
+                "steam_appid": safe_convert_value(game.get('AppID', game.get('steam_appid')), int, None),
                 "developers": parse_comma_separated_string(game.get('Developers', game.get('developers', ''))),
                 "publishers": parse_comma_separated_string(game.get('Publishers', game.get('publishers', ''))),
                 "release_date": safe_convert_value(game.get('Release date', game.get('release_date', '')), str, ''),
                 "metacritic_score": safe_convert_value(game.get('Metacritic score'), int, None),
                 "user_score": safe_convert_value(game.get('User score'), float, None),
                 "estimated_owners": safe_convert_value(game.get('Estimated owners'), str, ''),
-                "required_age": safe_convert_value(game.get('Required age'), int, 0)
+                "required_age": safe_convert_value(game.get('Required age'), int, 0),
+                "positive_ratings": safe_convert_value(game.get('Positive'), int, 0),
+                "negative_ratings": safe_convert_value(game.get('Negative'), int, 0)
             }
             
-            # Apply price filtering if specified
+            # Apply price filtering
             if price_info.get("free_only"):
                 price_str = str(game.get('Price', game.get('price', ''))).lower()
                 if 'free' not in price_str and '0' not in price_str:
@@ -1050,7 +1177,6 @@ async def find_similar_games(ai_analysis: Dict[str, Any], price_info: Dict[str, 
             
             if price_info.get("max_price"):
                 price_str = str(game.get('Price', game.get('price', '')))
-                # Try to extract numeric price
                 price_match = re.search(r'\$?(\d+\.?\d*)', price_str)
                 if price_match:
                     try:
@@ -1062,11 +1188,22 @@ async def find_similar_games(ai_analysis: Dict[str, Any], price_info: Dict[str, 
             
             results.append(game_info)
         
-        print(f"DEBUG: Found {len(results)} similar games")
+        # Log the results for debugging
+        for i, result in enumerate(results):
+            total_reviews = result['positive_ratings'] + result['negative_ratings']
+            rating_pct = 0
+            if total_reviews > 0:
+                rating_pct = (result['positive_ratings'] / total_reviews) * 100
+            print(f"DEBUG: Result {i+1}: {result['name']} - Relevance: {result['similarity_score']:.3f}, "
+                  f"Total Score: {result['total_score']:.1f}, Rating: {rating_pct:.1f}% ({total_reviews} reviews)")
+        
+        print(f"DEBUG: Found {len(results)} enhanced similar games")
         return results
         
     except Exception as e:
         print(f"DEBUG: Error finding similar games: {str(e)}")
+        import traceback
+        print(f"DEBUG: Full traceback: {traceback.format_exc()}")
         return []
 
 
@@ -1100,7 +1237,7 @@ async def get_ai_recommendations(request: AIRecommendationRequest):
         print(f"DEBUG: Price preferences: {price_info}")
         
         # Step 3: Find similar games using the dataset
-        similar_games = await find_similar_games(ai_analysis, price_info, limit=5, owned_games=owned_games)
+        similar_games = await find_similar_games(ai_analysis, price_info, limit=5, owned_games=owned_games, original_prompt=prompt)
         
         # Step 4: Enhance results with Steam API data if possible
         enhanced_games = []
