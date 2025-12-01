@@ -93,7 +93,6 @@ class GamesRepository:
                             'name': game_data.get('name', 'Unknown Game'),
                             'image': game_data.get('header_image'),
                             'short_desc': game_data.get('short_description'),
-                            'detailed_desc': game_data.get('detailed_description'),
                             'genres': [genre.get('description', '') for genre in game_data.get('genres', [])],
                             'languages': [],
                             'categories': [cat.get('description', '') for cat in game_data.get('categories', [])],

@@ -127,7 +127,6 @@ The API will be available at `http://localhost:8000`
 - `game_id` (bigint, PK) - Steam app ID
 - `name` (text) - Game title
 - `short_desc` (text) - Short description
-- `detailed_desc` (text) - Full description
 - `image` (text) - Header image URL
 - `price` (text) - Formatted price
 - `price_usd` (float) - Price in USD

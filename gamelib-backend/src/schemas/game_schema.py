@@ -16,7 +16,6 @@ class Game(BaseModel):
     name: Optional[str] = None
     header_image: Optional[str] = Field(None, alias='image')
     short_description: Optional[str] = Field(None, alias='short_desc')
-    detailed_description: Optional[str] = Field(None, alias='detailed_desc')
     genres: Optional[List[str]] = []
     languages: Optional[List[str]] = []
     categories: Optional[List[str]] = []

@@ -24,7 +24,7 @@ from pathlib import Path
 
 # Add src directory to path
 current_dir = Path(__file__).resolve().parent
-project_root = current_dir.parent.parent
+project_root = current_dir.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.db.supabase_client import supabase
@@ -124,7 +124,6 @@ async def get_steam_app_details(app_id: int, skip_content_filter: bool = True) -
                         "app_id": app_id,
                         "title": game_data.get('name', 'Unknown Game'),
                         "description": game_data.get('short_description', ''),
-                        "detailed_description": game_data.get('detailed_description', ''),
                         "image": game_data.get('header_image', ''),
                         "price": price_formatted,
                         "price_usd": price_usd,
@@ -345,7 +344,6 @@ def format_game_data(app_id: int, name: str, game_details: Optional[Dict[str, An
         return {
             "game_id": app_id,
             "name": name,
-            "detailed_desc": None,
             "short_desc": None,
             "image": None,
             "platforms": {},
@@ -393,7 +391,6 @@ def format_game_data(app_id: int, name: str, game_details: Optional[Dict[str, An
     formatted_data = {
         "game_id": app_id,
         "name": game_details.get('title', name),
-        "detailed_desc": game_details.get('detailed_description'),
         "short_desc": game_details.get('description'),
         "image": game_details.get('image'),
         "platforms": platforms,

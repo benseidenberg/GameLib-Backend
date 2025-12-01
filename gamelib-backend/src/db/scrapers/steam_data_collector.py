@@ -366,7 +366,7 @@ async def main():
     """Main entry point for the collector"""
     await run_continuous_collector(
         target_users=10000,
-        max_attempts=500
+        max_attempts=5000
     )
 
 

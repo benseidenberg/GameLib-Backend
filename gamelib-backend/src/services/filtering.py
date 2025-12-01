@@ -104,10 +104,9 @@ class FilteringService:
         # Check name and description for keywords
         name = game.get('name', '').lower()
         short_desc = game.get('short_description', '').lower()
-        detailed_desc = game.get('detailed_description', '').lower()
         
         for keyword in FilteringService.INAPPROPRIATE_KEYWORDS:
-            if keyword in name or keyword in short_desc or keyword in detailed_desc:
+            if keyword in name or keyword in short_desc:
                 return False
         
         return True
@@ -273,7 +272,6 @@ class FilteringService:
             game_data = {
                 'name': game.name,
                 'short_description': game.short_description or '',
-                'detailed_description': game.detailed_description or '',
                 'content_descriptors': game.content or {},
                 'content': game.content or {},
                 'required_age': game.required_age or 0,
@@ -347,7 +345,6 @@ class FilteringService:
             game_data = {
                 'name': game.name,
                 'short_description': game.short_description or '',
-                'detailed_description': game.detailed_description or '',
                 'content_descriptors': game.content or {},
                 'content': game.content or {},
                 'required_age': game.required_age or 0,
