@@ -1,6 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
-from src.recommender.recommender import get_game_clusters
 from fastapi import APIRouter, HTTPException
 from src.services.clusters import ClustersService
 from src.services.filtering import FilteringService
@@ -12,7 +11,7 @@ import httpx
 import asyncio
 import openai
 import pandas as pd
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union, Type
 import re
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -512,7 +511,11 @@ async def load_steam_dataset():
         dataset = load_dataset("FronkonGames/steam-games-dataset", split="train")
         
         # Convert to pandas DataFrame for easier manipulation
-        _steam_dataset = pd.DataFrame(dataset)
+        from datasets import Dataset as HFDataset
+        if isinstance(dataset, HFDataset):
+            _steam_dataset = pd.DataFrame(dataset)  # type: ignore
+        else:
+            _steam_dataset = pd.DataFrame(dataset)  # type: ignore
         
         print(f"DEBUG: Dataset columns: {list(_steam_dataset.columns)}")
         print(f"DEBUG: Dataset shape: {_steam_dataset.shape}")
@@ -556,7 +559,7 @@ async def load_steam_dataset():
             
             # Filter for games that support English
             # Check for 'English' in the language field (case insensitive)
-            english_mask = _steam_dataset[language_col].astype(str).str.contains(
+            english_mask = _steam_dataset[language_col].astype(str).str.lower().str.contains(
                 'english', case=False, na=False
             )
             _steam_dataset = _steam_dataset[english_mask]
@@ -744,6 +747,8 @@ Return only valid JSON with the gaming preference analysis."""
 
         # Parse the JSON response
         analysis_text = response.choices[0].message.content
+        if analysis_text is None:
+            analysis_text = ""
         print(f"DEBUG: Raw AI response: {analysis_text}")
         
         # Try to extract JSON from the response
@@ -851,7 +856,7 @@ def extract_price_preference(prompt: str, ai_analysis: Dict[str, Any]) -> Dict[s
     return price_info
 
 
-def safe_convert_value(value, target_type=str, default=None):
+def safe_convert_value(value, target_type: Union[Type[int], Type[float], Type[str]] = str, default=None):
     """
     Safely convert pandas/numpy values to native Python types for JSON serialization
     """
@@ -859,9 +864,9 @@ def safe_convert_value(value, target_type=str, default=None):
         if pd.isna(value) or value is None:
             return default
         
-        if target_type == int:
+        if target_type is int:
             return int(value)
-        elif target_type == float:
+        elif target_type is float:
             return float(value)
         else:
             return str(value)
@@ -944,8 +949,8 @@ def calculate_game_score(game, similarity_score: float, popularity_pref: str) ->
     score = similarity_score * 100  # Convert to 0-100 scale
     
     # Get ratings data
-    positive = safe_convert_value(game.get('Positive', 0), int, 0)
-    negative = safe_convert_value(game.get('Negative', 0), int, 0)
+    positive = int(safe_convert_value(game.get('Positive', 0), int, 0) or 0)
+    negative = int(safe_convert_value(game.get('Negative', 0), int, 0) or 0)
     total_reviews = positive + negative
     
     # Calculate rating percentage
@@ -996,7 +1001,7 @@ def calculate_game_score(game, similarity_score: float, popularity_pref: str) ->
     return score
 
 
-async def find_similar_games(ai_analysis: Dict[str, Any], price_info: Dict[str, Any], limit: int = 5, owned_games: List[int] = None, original_prompt: str = "") -> List[Dict[str, Any]]:
+async def find_similar_games(ai_analysis: Dict[str, Any], price_info: Dict[str, Any], limit: int = 5, owned_games: Optional[List[int]] = None, original_prompt: str = "") -> List[Dict[str, Any]]:
     """
     Find games similar to the user's preferences using enhanced matching
     """
@@ -1021,7 +1026,6 @@ async def find_similar_games(ai_analysis: Dict[str, Any], price_info: Dict[str, 
         # First, add the original prompt words (cleaned up)
         if original_prompt:
             # Extract meaningful keywords from original prompt (remove common words)
-            import re
             original_keywords = re.findall(r'\b\w+\b', original_prompt.lower())
             # Filter out common stop words but keep game-specific terms
             stop_words = {'give', 'me', 'a', 'an', 'the', 'i', 'want', 'need', 'looking', 'for', 'find', 'get', 'some'}
@@ -1046,11 +1050,16 @@ async def find_similar_games(ai_analysis: Dict[str, Any], price_info: Dict[str, 
         # Enhanced TF-IDF matching
         if 'combined_text' not in dataset.columns:
             print("DEBUG: combined_text column missing, recreating...")
+            name_col = dataset['name'] if 'name' in dataset.columns else pd.Series([''] * len(dataset))
+            about_col = dataset['About the game'] if 'About the game' in dataset.columns else (dataset['description'] if 'description' in dataset.columns else pd.Series([''] * len(dataset)))
+            genres_col = dataset['Genres'] if 'Genres' in dataset.columns else pd.Series([''] * len(dataset))
+            tags_col = dataset['Tags'] if 'Tags' in dataset.columns else pd.Series([''] * len(dataset))
+            
             dataset['combined_text'] = (
-                dataset['name'].fillna('').astype(str) + " " + 
-                dataset.get('About the game', dataset.get('description', '')).fillna('').astype(str) + " " +
-                dataset.get('Genres', '').fillna('').astype(str) + " " +
-                dataset.get('Tags', '').fillna('').astype(str)
+                name_col.fillna('').astype(str) + " " + 
+                about_col.fillna('').astype(str) + " " +
+                genres_col.fillna('').astype(str) + " " +
+                tags_col.fillna('').astype(str)
             )
         
         # Create TF-IDF vectors with improved parameters for better matching
@@ -1123,16 +1132,16 @@ async def find_similar_games(ai_analysis: Dict[str, Any], price_info: Dict[str, 
                 "similarity_score": float(similarity_score),
                 "total_score": candidate['total_score'],
                 "price": safe_convert_value(game.get('Price', game.get('price', 'N/A')), str, 'N/A'),
-                "steam_appid": safe_convert_value(game.get('AppID', game.get('steam_appid')), int, None),
+                "steam_appid": int(safe_convert_value(game.get('AppID', game.get('steam_appid')), int, 0) or 0) if game.get('AppID') or game.get('steam_appid') else None,
                 "developers": parse_comma_separated_string(game.get('Developers', game.get('developers', ''))),
                 "publishers": parse_comma_separated_string(game.get('Publishers', game.get('publishers', ''))),
                 "release_date": safe_convert_value(game.get('Release date', game.get('release_date', '')), str, ''),
-                "metacritic_score": safe_convert_value(game.get('Metacritic score'), int, None),
-                "user_score": safe_convert_value(game.get('User score'), float, None),
+                "metacritic_score": int(safe_convert_value(game.get('Metacritic score'), int, 0) or 0) if game.get('Metacritic score') else None,
+                "user_score": float(safe_convert_value(game.get('User score'), float, 0.0) or 0.0) if game.get('User score') else None,
                 "estimated_owners": safe_convert_value(game.get('Estimated owners'), str, ''),
-                "required_age": safe_convert_value(game.get('Required age'), int, 0),
-                "positive_ratings": safe_convert_value(game.get('Positive'), int, 0),
-                "negative_ratings": safe_convert_value(game.get('Negative'), int, 0)
+                "required_age": int(safe_convert_value(game.get('Required age'), int, 0) or 0),
+                "positive_ratings": int(safe_convert_value(game.get('Positive'), int, 0) or 0),
+                "negative_ratings": int(safe_convert_value(game.get('Negative'), int, 0) or 0)
             }
             
             # Apply price filtering
@@ -1301,7 +1310,7 @@ Explain why these games are great matches for their gaming preferences."""
             temperature=0.5  # Moderate creativity but focused
         )
 
-        explanation = response.choices[0].message.content.strip()
+        explanation = (response.choices[0].message.content or "").strip()
         
         # Fallback check - if explanation seems off-topic, use default
         if len(explanation) < 20 or 'game' not in explanation.lower():
