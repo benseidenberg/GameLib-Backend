@@ -147,13 +147,20 @@ def is_content_appropriate(game_data):
         
         # Check age ratings
         required_age = game_data.get('required_age', 0)
-        if required_age >= 18:
-            # Additional check for adult content categories
-            categories = game_data.get('categories', [])
-            for category in categories:
-                cat_desc = (category.get('description') or '').lower()
-                if 'adult only' in cat_desc or 'mature' in cat_desc:
-                    return False
+        try:
+            # Convert to int if it's a string
+            required_age_int = int(required_age) if required_age else 0
+            if required_age_int >= 18:
+                # Additional check for adult content categories
+                categories = game_data.get('categories', [])
+                for category in categories:
+                    cat_desc = (category.get('description') or '').lower()
+                    if 'adult only' in cat_desc or 'mature' in cat_desc:
+                        return False
+        except (ValueError, TypeError):
+            # If conversion fails, skip age-based filtering for this game
+            print(f"DEBUG: Could not convert required_age '{required_age}' to int, skipping age check")
+            pass
         
         # Check game name and description for inappropriate content
         game_name = (game_data.get('name') or '').lower()
