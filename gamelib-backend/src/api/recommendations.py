@@ -1,6 +1,12 @@
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from src.recommender.recommender import get_game_clusters
+from fastapi import APIRouter, HTTPException
+from src.services.clusters import ClustersService
+from src.services.filtering import FilteringService
+from src.db.repositories.games_db import GamesRepository
+from src.schemas.user_schema import User
+from src.db.supabase_client import supabase
 import os
 import httpx
 import asyncio
@@ -221,6 +227,9 @@ async def get_steam_app_details_basic(app_id: int):
     except Exception as e:
         print(f"DEBUG: Error fetching basic Steam app details for {app_id}: {str(e)}")
         return None
+# Initialize services
+clusters_service = ClustersService()
+filtering_service = FilteringService()
 
 
 @router.get("/clusters/{steam_id}")
@@ -228,11 +237,12 @@ async def get_clusters(steam_id: int):
     """
     Get game recommendations/clusters for a user by Steam ID
     """
-    print(f"DEBUG: Starting recommendations for steam_id: {steam_id}")
     try:
-        print("DEBUG: About to call get_game_clusters")
-        clusters = await get_game_clusters(steam_id)
-        print(f"DEBUG: get_game_clusters returned: {type(clusters)} - {clusters}")
+        # Validate steam_id
+        if steam_id <= 0 or steam_id > 999999999999999999:
+            raise HTTPException(status_code=400, detail="Invalid Steam ID")
+        
+        clusters = await clusters_service.get_cluster_recommendations(steam_id)
         if not clusters:
             raise HTTPException(status_code=404, detail="No recommendations found")
         return clusters
@@ -252,40 +262,14 @@ async def get_steam_profile(steam_id: int):
     Get Steam user's owned games and play data
     """
     try:
-        url = f"http://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?key={STEAM_API_KEY}&steamid={steam_id}&format=json&include_appinfo=1&include_played_free_games=1"
+        profile_data = await User.fetch_profile_data(steam_id)
+        if not profile_data:
+            raise HTTPException(status_code=404, detail="Steam profile not found or private")
         
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url)
-            if response.status_code == 200:
-                data = response.json()
+        return profile_data
                 
-                if "response" in data and "games" in data["response"]:
-                    # Process the games data
-                    games = data["response"]["games"]
-                    
-                    # Create a simplified version for the API response
-                    processed_games = []
-                    for game in games:
-                        if game.get("playtime_forever", 0) > 0:  # Only include played games
-                            processed_games.append({
-                                "appid": game.get("appid"),
-                                "name": game.get("name", "Unknown Game"),
-                                "playtime_forever": game.get("playtime_forever", 0),
-                                "playtime_2weeks": game.get("playtime_2weeks", 0),
-                                "img_icon_url": game.get("img_icon_url", ""),
-                                "rtime_last_played": game.get("rtime_last_played")
-                            })
-                    
-                    return {
-                        "steam_id": steam_id,
-                        "total_games": len(processed_games),
-                        "games": processed_games
-                    }
-                else:
-                    return {"steam_id": steam_id, "total_games": 0, "games": []}
-            else:
-                raise HTTPException(status_code=response.status_code, detail="Failed to fetch Steam profile")
-                
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching Steam profile: {str(e)}")
 
@@ -296,84 +280,59 @@ async def get_steam_player_summary(steam_id: int):
     Get Steam user's profile information (name, avatar, etc.)
     """
     try:
-        url = f"http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/"
-        params = {
-            'key': STEAM_API_KEY,
-            'steamids': str(steam_id)
-        }
+        player_data = await User.fetch_player_summary(steam_id)
+        if not player_data:
+            raise HTTPException(status_code=404, detail="Player not found")
         
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            if "response" in data and "players" in data["response"] and len(data["response"]["players"]) > 0:
-                player = data["response"]["players"][0]
-                return {
-                    "steamid": player.get("steamid"),
-                    "personaname": player.get("personaname"),
-                    "profileurl": player.get("profileurl"),
-                    "avatar": player.get("avatar"),
-                    "avatarmedium": player.get("avatarmedium"),
-                    "avatarfull": player.get("avatarfull"),
-                    "personastate": player.get("personastate"),
-                    "communityvisibilitystate": player.get("communityvisibilitystate"),
-                    "profilestate": player.get("profilestate"),
-                    "lastlogoff": player.get("lastlogoff"),
-                    "commentpermission": player.get("commentpermission")
-                }
-            else:
-                raise HTTPException(status_code=404, detail="Player not found")
+        return player_data
                 
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=e.response.status_code, detail="Steam API error")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching Steam player summary: {str(e)}")
 
 
-@router.get("/steam/game-details/{app_id}")
-async def get_steam_game_details_endpoint(app_id: int):
+@router.get("/steam/game-details/{game_id}")
+async def get_steam_game_details_endpoint(game_id: int):
     """
     Get detailed information about a specific Steam game
     """
     try:
-        print(f"DEBUG: Fetching game details for app_id: {app_id}")
-        game_info = await get_steam_app_details(app_id)
+        # Validate game_id
+        if game_id <= 0 or game_id > 999999999:
+            raise HTTPException(status_code=400, detail="Invalid Steam app ID")
         
-        if not game_info:
-            print(f"DEBUG: No game info returned for app_id: {app_id}")
-            raise HTTPException(status_code=404, detail=f"Game with app_id {app_id} not found or filtered out")
+        game = await GamesRepository.fetch_details(game_id)
         
-        print(f"DEBUG: Successfully fetched game details for: {game_info.get('title', 'Unknown')}")
-        return game_info
+        if not game:
+            raise HTTPException(status_code=404, detail=f"Game with game_id {game_id} not found or filtered out")
+        
+        return game
         
     except HTTPException:
-        raise  # Re-raise HTTP exceptions
+        raise
     except Exception as e:
-        print(f"DEBUG: Error in get_steam_game_details for app_id {app_id}: {str(e)}")
+        print(f"DEBUG: Error in get_steam_game_details for game_id {game_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching game details: {str(e)}")
 
 
-@router.get("/recommendations/test/{steam_id}")
-async def test_recommendations(steam_id: int):
+@router.get("/recommendations/clusters/{steam_id}")
+async def get_cluster_recommendations(steam_id: int):
     """
-    Test endpoint that returns 3 games with their details from Steam API
-    Uses the provided Steam ID to get clusters, then returns first 3 games with full details
+    Get 5 cluster-based game recommendations with full details
+    Uses Steam's clustering API to find games based on user's playtime patterns
     """
     try:
         # Get game clusters for the provided Steam ID
-        clusters_data = await get_game_clusters(steam_id)
+        clusters_data = await clusters_service.get_cluster_recommendations(steam_id)
         
         # Extract app IDs from clusters with their source games
-        app_ids_with_source = []  # Will store tuples of (app_id, source_game_info)
+        game_ids_with_source = []  # Will store tuples of (game_id, source_game_info)
         if clusters_data and isinstance(clusters_data, dict):
             # Handle the actual structure: clusters_data['response']['clusters']
             response_data = clusters_data.get('response', {})
             clusters_list = response_data.get('clusters', [])
-            
-            print(f"DEBUG: Found {len(clusters_list)} clusters")
-            
+                        
             if clusters_list:
                 # Sort clusters by relevance (recent playtime + total playtime + popularity)
                 def cluster_score(cluster):
@@ -388,20 +347,17 @@ async def test_recommendations(steam_id: int):
                 # Sort clusters by relevance score
                 sorted_clusters = sorted(clusters_list, key=cluster_score, reverse=True)
                 
-                print(f"DEBUG: Top clusters by relevance:")
                 for i, cluster in enumerate(sorted_clusters[:5]):
                     score = cluster_score(cluster)
                     recent = cluster.get('playtime_2weeks', 0)
                     total = cluster.get('playtime_forever', 0)
-                    print(f"  Cluster {cluster.get('cluster_id')}: score={score:.1f}, recent={recent}min, total={total}min")
                 
                 # Take from the most relevant clusters - ONE game per cluster for variety
                 for cluster in sorted_clusters[:10]:  # Check top 10 clusters to ensure we get 5 games
-                    if len(app_ids_with_source) >= 5:
+                    if len(game_ids_with_source) >= 5:
                         break
                         
                     cluster_id = cluster.get('cluster_id')
-                    print(f"DEBUG: Processing cluster {cluster_id}")
                     
                     # Get played games and similar games
                     similar_apps = cluster.get('similar_items_appids', [])
@@ -412,66 +368,56 @@ async def test_recommendations(steam_id: int):
                         similar_apps = list(similar_apps)  # Make a copy
                         random.shuffle(similar_apps)
                     
-                    print(f"DEBUG: Found {len(played_apps)} played apps and {len(similar_apps)} similar apps")
-                    print(f"DEBUG: Played games in this cluster: {played_apps}")
-                    print(f"DEBUG: Similar games available: {similar_apps[:8]}")  # Show first 8
-                    
                     # For each cluster, we'll pick one played game as the "source"
                     # and recommend ONE similar game based on it
                     if played_apps and similar_apps:
                         # Shuffle played apps too to vary which game is used as source
                         played_apps_list = list(played_apps)
                         random.shuffle(played_apps_list)
-                        source_app_id = played_apps_list[0]
+                        source_game_id = played_apps_list[0]
                         
                         # Fetch source game details
-                        source_game_info = await get_steam_app_details_basic(source_app_id)
+                        source_game_info = await GamesRepository.fetch_basic(source_game_id)
                         
                         if source_game_info:
                             # Add ONE similar game from this cluster for variety
-                            for app_id in similar_apps:
-                                # Check if we already have this app_id
-                                existing_app_ids = [item[0] for item in app_ids_with_source]
-                                if app_id not in existing_app_ids:
-                                    app_ids_with_source.append((app_id, source_game_info))
-                                    print(f"DEBUG: Added similar app_id: {app_id} based on {source_game_info['title']}")
+                            for game_id in similar_apps:
+                                # Check if we already have this game_id
+                                existing_game_ids = [item[0] for item in game_ids_with_source]
+                                if game_id not in existing_game_ids:
+                                    game_ids_with_source.append((game_id, source_game_info))
                                     break  # Only take ONE game per cluster
-        
-        print(f"DEBUG: Final app_ids with sources: {[(item[0], item[1]['title']) for item in app_ids_with_source]}")
-        
+                
         # If we don't have enough games from clusters, add some popular games as fallback
-        if len(app_ids_with_source) < 5:
-            print(f"DEBUG: Only got {len(app_ids_with_source)} games from clusters, adding fallback games")
+        if len(game_ids_with_source) < 5:
             fallback_games = [570, 440, 730]  # Dota 2, TF2, CS:GO
             
-            for app_id in fallback_games:
-                if len(app_ids_with_source) >= 5:
+            for game_id in fallback_games:
+                if len(game_ids_with_source) >= 5:
                     break
                 # Add fallback games without a specific source
-                existing_app_ids = [item[0] for item in app_ids_with_source]
-                if app_id not in existing_app_ids:
-                    app_ids_with_source.append((app_id, {"title": "Popular games", "app_id": None}))
+                existing_game_ids = [item[0] for item in game_ids_with_source]
+                if game_id not in existing_game_ids:
+                    game_ids_with_source.append((game_id, {"title": "Popular games", "game_id": None}))
         
         # Limit to 5 games
-        app_ids_with_source = app_ids_with_source[:5]
-        print(f"DEBUG: Final app_ids to fetch: {[item[0] for item in app_ids_with_source]}")
+        game_ids_with_source = game_ids_with_source[:5]
         
         # Fetch game details for each app ID with content filtering
         games_data = []
         
-        for app_id, source_info in app_ids_with_source:
-            game_info = await get_steam_app_details(app_id)
-            if game_info:  # Only add if not filtered out
-                # Add the source information to the game data
-                game_info["based_on"] = {
+        for game_id, source_info in game_ids_with_source:
+            game = await GamesRepository.fetch_details(game_id)
+            if game:  # Only add if not filtered out
+                # Add the source information to the game
+                game.based_on = {
                     "title": source_info["title"],
-                    "app_id": source_info.get("app_id")
+                    "game_id": source_info.get("game_id")
                 }
-                games_data.append(game_info)
+                games_data.append(game)
         
         # If we don't have enough games after filtering, try to get more from additional clusters
         if len(games_data) < 5 and clusters_data:
-            print(f"DEBUG: Only got {len(games_data)} appropriate games, fetching more...")
             response_data = clusters_data.get('response', {})
             clusters_list = response_data.get('clusters', [])
             
@@ -501,44 +447,44 @@ async def test_recommendations(steam_id: int):
                 if played_apps:
                     played_apps_list = list(played_apps)
                     random.shuffle(played_apps_list)
-                    source_app_id = played_apps_list[0]
-                    source_game_info = await get_steam_app_details_basic(source_app_id)
+                    source_game_id = played_apps_list[0]
+                    source_game_info = await GamesRepository.fetch_basic(source_game_id)
                     
                     if source_game_info:
-                        for app_id in similar_apps[:5]:  # Try more games per cluster
+                        for game_id in similar_apps[:5]:  # Try more games per cluster
                             if len(games_data) >= 5:
                                 break
                             
                             # Check if we already have this game
-                            existing_app_ids = [game['app_id'] for game in games_data]
-                            if app_id not in existing_app_ids:
-                                game_info = await get_steam_app_details(app_id)
-                                if game_info:
-                                    game_info["based_on"] = {
+                            existing_game_ids = [game.game_id for game in games_data]
+                            if game_id not in existing_game_ids:
+                                game = await GamesRepository.fetch_details(game_id)
+                                if game:
+                                    game.based_on = {
                                         "title": source_game_info["title"],
-                                        "app_id": source_game_info.get("app_id")
+                                        "game_id": source_game_info.get("game_id")
                                     }
-                                    games_data.append(game_info)
+                                    games_data.append(game)
         
         # Final fallback to safe, popular games if still not enough
         if len(games_data) < 5:
             safe_fallback_games = [570, 440, 730, 359550, 271590]  # Dota 2, TF2, CS:GO, Rainbow Six, GTA V
-            for app_id in safe_fallback_games:
+            for game_id in safe_fallback_games:
                 if len(games_data) >= 5:
                     break
                 
-                existing_app_ids = [game['app_id'] for game in games_data]
-                if app_id not in existing_app_ids:  # Avoid duplicates
-                    game_info = await get_steam_app_details(app_id)
-                    if game_info:
-                        game_info["based_on"] = {
+                existing_game_ids = [game.game_id for game in games_data]
+                if game_id not in existing_game_ids:  # Avoid duplicates
+                    game = await GamesRepository.fetch_details(game_id)
+                    if game:
+                        game.based_on = {
                             "title": "Popular games",
-                            "app_id": None
+                            "game_id": None
                         }
-                        games_data.append(game_info)
+                        games_data.append(game)
         
         return {
-            "message": "Test recommendations successful",
+            "message": "Cluster recommendations successful",
             "steam_id": steam_id,
             "total_games": len(games_data),
             "games": games_data
@@ -1366,3 +1312,5 @@ Explain why these games are great matches for their gaming preferences."""
     except Exception as e:
         print(f"DEBUG: Error generating explanation: {str(e)}")
         return f"These games match your interest in {analysis.get('summary', 'games matching your preferences')}!"
+        print(f"DEBUG: Error in get_cluster_recommendations: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error getting cluster recommendations: {str(e)}")

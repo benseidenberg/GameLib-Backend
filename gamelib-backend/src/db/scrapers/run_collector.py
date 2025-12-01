@@ -5,12 +5,15 @@ Run this to start collecting Steam user data for collaborative filtering.
 
 import sys
 import os
-
-# Add parent directory to path so we can import from src
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from src.db.steam_data_collector import main
 import asyncio
+from pathlib import Path
+
+# Add project root to path
+current_dir = Path(__file__).resolve().parent
+project_root = current_dir.parent.parent.parent
+sys.path.insert(0, str(project_root))
+
+from src.db.scrapers.steam_data_collector import main
 
 if __name__ == "__main__":
     print("\n🎮 Starting Steam Data Collector...")

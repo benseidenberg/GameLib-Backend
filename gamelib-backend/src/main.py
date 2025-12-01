@@ -6,6 +6,8 @@ from src.api import users
 from src.api.auth import router as auth_router
 from src.api.recommendations import router as recommendations_router, load_steam_dataset
 from src.api.c_filtering import router as c_filtering_router
+from src.api.recommendations import router as recommendations_router
+from src.api.collaborative_filtering import router as collaborative_filtering_router
 
 app = FastAPI()
 
@@ -32,7 +34,7 @@ async def startup_event():
 app.include_router(auth_router, prefix="/api")
 app.include_router(users.router, prefix="/api")
 app.include_router(recommendations_router, prefix="/api")
-app.include_router(c_filtering_router, prefix="/api")
+app.include_router(collaborative_filtering_router, prefix="/api")
 
 @app.get("/")
 def read_root():
