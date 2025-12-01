@@ -335,6 +335,8 @@ class FilteringService:
             platforms=platforms,
             min_price=None,
             max_price=max_price,
+            min_positive=min_positive_reviews,
+            min_negative=min_negative_reviews,
             order_by='positive'
         )
         

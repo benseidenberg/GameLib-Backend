@@ -5,8 +5,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.api import users
 from src.api.auth import router as auth_router
 from src.api.recommendations import router as recommendations_router, load_steam_dataset
-from src.api.c_filtering import router as c_filtering_router
-from src.api.recommendations import router as recommendations_router
 from src.api.collaborative_filtering import router as collaborative_filtering_router
 
 app = FastAPI()

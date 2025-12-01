@@ -271,8 +271,16 @@ class GamesRepository:
         """
         Find games matching multiple filters using SQL queries
         
+        NOTE: For optimal performance, ensure these PostgreSQL indexes exist:
+        - CREATE INDEX idx_games_genres_gin ON games_db USING GIN (genres);
+        - CREATE INDEX idx_games_tags_gin ON games_db USING GIN (tags);
+        - CREATE INDEX idx_games_categories_gin ON games_db USING GIN (categories);
+        - CREATE INDEX idx_games_languages_gin ON games_db USING GIN (languages);
+        - CREATE INDEX idx_games_positive ON games_db (positive);
+        - CREATE INDEX idx_games_price ON games_db (price);
+        
         Args:
-            game_ids: Filter by specific game_ids
+            game_ids: Filter by specific game_ids (most selective)
             genres: Filter by genres (array overlap)
             tags: Filter by tags (array overlap)
             categories: Filter by categories (array overlap)
@@ -294,21 +302,26 @@ class GamesRepository:
             
             query = supabase.table('games_db').select('*')
             
-            # Filter by game_ids if provided
+            # OPTIMIZATION: Apply most selective filters first
+            # 1. Filter by specific game_ids (most selective when provided)
             if game_ids:
                 query = query.in_('game_id', game_ids)
+                # When game_ids are provided, reduce limit to batch size
+                effective_limit = min(limit, len(game_ids) * 2)
+            else:
+                effective_limit = limit
             
-            # Array overlap filters using 'ov' operator
-            if genres:
-                query = query.filter('genres', 'ov', json.dumps(genres))
-            if tags:
-                query = query.filter('tags', 'ov', json.dumps(tags))
-            if categories:
-                query = query.filter('categories', 'ov', json.dumps(categories))
-            if languages:
-                query = query.filter('supported_languages', 'ov', json.dumps(languages))
+            # 2. Apply numeric filters (fast with indexes)
+            if min_positive is not None:
+                query = query.gte('positive', min_positive)
+            if min_negative is not None:
+                query = query.gte('negative', min_negative)
+            if min_price is not None:
+                query = query.gte('price', min_price)
+            if max_price is not None:
+                query = query.lte('price', max_price)
             
-            # Platform filters (boolean columns)
+            # 3. Platform filters (boolean columns - indexed)
             if platforms:
                 for platform in platforms:
                     if platform.lower() == 'windows':
@@ -318,21 +331,24 @@ class GamesRepository:
                     elif platform.lower() == 'linux':
                         query = query.eq('linux', True)
             
-            # Price range filters
-            if min_price is not None:
-                query = query.gte('price', min_price)
-            if max_price is not None:
-                query = query.lte('price', max_price)
+            # 4. Array overlap filters (requires GIN indexes for performance)
+            # Format arrays as PostgreSQL array literals: {item1,item2,item3}
+            if genres:
+                array_literal = '{' + ','.join(f'"{g}"' for g in genres) + '}'
+                query = query.filter('genres', 'ov', array_literal)
+            if tags:
+                array_literal = '{' + ','.join(f'"{t}"' for t in tags) + '}'
+                query = query.filter('tags', 'ov', array_literal)
+            if categories:
+                array_literal = '{' + ','.join(f'"{c}"' for c in categories) + '}'
+                query = query.filter('categories', 'ov', array_literal)
+            if languages:
+                array_literal = '{' + ','.join(f'"{l}"' for l in languages) + '}'
+                query = query.filter('languages', 'ov', array_literal)
             
-            # Review count filters
-            if min_positive is not None:
-                query = query.gte('positive', min_positive)
-            if min_negative is not None:
-                query = query.gte('negative', min_negative)
-            
-            # Ordering and limit
+            # 5. Ordering and limit
             query = query.order(order_by, desc=not ascending)
-            query = query.limit(limit)
+            query = query.limit(effective_limit)
             
             response = query.execute()
             
@@ -355,11 +371,16 @@ class GamesRepository:
         platforms: Optional[List[str]] = None,
         min_price: Optional[float] = None,
         max_price: Optional[float] = None,
+        min_positive: Optional[int] = None,
+        min_negative: Optional[int] = None,
         order_by: str = 'positive'
     ) -> List['Game']:
         """
         Fetch a batch of games by IDs with filters applied
         Used for batch processing in collaborative filtering
+        
+        OPTIMIZATION: Process in smaller batches if needed to avoid timeouts.
+        The game_ids filter is most selective and will be applied first.
         
         Args:
             batch_ids: List of game_ids to fetch
@@ -370,6 +391,8 @@ class GamesRepository:
             platforms: Filter by platforms
             min_price: Minimum price
             max_price: Maximum price
+            min_positive: Minimum positive reviews
+            min_negative: Minimum negative reviews
             order_by: Column to order by
             
         Returns:
@@ -377,6 +400,29 @@ class GamesRepository:
         """
         if not batch_ids:
             return []
+        
+        # For very large batches, process in chunks to avoid timeout
+        BATCH_SIZE = 1000
+        if len(batch_ids) > BATCH_SIZE:
+            all_games = []
+            for i in range(0, len(batch_ids), BATCH_SIZE):
+                chunk = batch_ids[i:i + BATCH_SIZE]
+                chunk_games = GamesRepository.find_by_filters(
+                    game_ids=chunk,
+                    genres=genres,
+                    tags=tags,
+                    categories=categories,
+                    languages=languages,
+                    platforms=platforms,
+                    min_price=min_price,
+                    max_price=max_price,
+                    min_positive=min_positive,
+                    min_negative=min_negative,
+                    limit=len(chunk) * 2,  # Allow some room for filtering
+                    order_by=order_by
+                )
+                all_games.extend(chunk_games)
+            return all_games
         
         return GamesRepository.find_by_filters(
             game_ids=batch_ids,
@@ -387,7 +433,9 @@ class GamesRepository:
             platforms=platforms,
             min_price=min_price,
             max_price=max_price,
-            limit=len(batch_ids),
+            min_positive=min_positive,
+            min_negative=min_negative,
+            limit=len(batch_ids) * 2,  # Allow room for filters to reduce
             order_by=order_by
         )
     
@@ -413,14 +461,19 @@ class GamesRepository:
         try:
             query = supabase.table('games_db').select('game_id')
             
+            # Array overlap filters using PostgreSQL array literals: {item1,item2,item3}
             if genres:
-                query = query.filter('genres', 'ov', json.dumps(genres))
+                array_literal = '{' + ','.join(f'"{g}"' for g in genres) + '}'
+                query = query.filter('genres', 'ov', array_literal)
             if tags:
-                query = query.filter('tags', 'ov', json.dumps(tags))
+                array_literal = '{' + ','.join(f'"{t}"' for t in tags) + '}'
+                query = query.filter('tags', 'ov', array_literal)
             if categories:
-                query = query.filter('categories', 'ov', json.dumps(categories))
+                array_literal = '{' + ','.join(f'"{c}"' for c in categories) + '}'
+                query = query.filter('categories', 'ov', array_literal)
             if languages:
-                query = query.filter('supported_languages', 'ov', json.dumps(languages))
+                array_literal = '{' + ','.join(f'"{l}"' for l in languages) + '}'
+                query = query.filter('languages', 'ov', array_literal)
             
             if platforms:
                 for platform in platforms:

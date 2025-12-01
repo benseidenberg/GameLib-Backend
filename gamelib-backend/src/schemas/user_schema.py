@@ -45,18 +45,18 @@ class User(BaseModel):
                     if "response" in data and "games" in data["response"]:
                         games = data["response"]["games"]
                         
-                        # Process games data
-                        processed_games = []
+                        # Process games data as a dictionary with appid as key
+                        processed_games = {}
                         for game in games:
                             if game.get("playtime_forever", 0) > 0:
-                                processed_games.append({
-                                    "appid": game.get("appid"),
+                                appid = str(game.get("appid"))  # Use string key for consistency
+                                processed_games[appid] = {
                                     "name": game.get("name", "Unknown Game"),
                                     "playtime_forever": game.get("playtime_forever", 0),
                                     "playtime_2weeks": game.get("playtime_2weeks", 0),
                                     "img_icon_url": game.get("img_icon_url", ""),
                                     "rtime_last_played": game.get("rtime_last_played")
-                                })
+                                }
                         
                         return {
                             "steam_id": steam_id,
@@ -64,7 +64,7 @@ class User(BaseModel):
                             "games": processed_games
                         }
                     else:
-                        return {"steam_id": steam_id, "total_games": 0, "games": []}
+                        return {"steam_id": steam_id, "total_games": 0, "games": {}}
                 else:
                     return None
                     
