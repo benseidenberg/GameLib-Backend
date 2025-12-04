@@ -46,6 +46,7 @@ wheels/
 *.db
 *.sqlite3
 *.sqlite
+*.csv
 
 # Logs
 *.log

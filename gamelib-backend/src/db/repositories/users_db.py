@@ -12,6 +12,26 @@ class UsersRepository:
     """Repository for users table operations"""
     
     @staticmethod
+    def generate_games_array(games: Dict[str, Any]) -> List[str]:
+        """
+        Generate sorted games_array from games dictionary
+        
+        Args:
+            games: Dictionary of game_id -> game data with playtime_forever
+            
+        Returns:
+            List of game IDs sorted by playtime (descending)
+        """
+        if not games:
+            return []
+        
+        return sorted(
+            games.keys(),
+            key=lambda gid: games[gid].get('playtime_forever', 0) if isinstance(games[gid], dict) else 0,
+            reverse=True
+        )
+    
+    @staticmethod
     def find_by_steam_id(steam_id: int) -> Optional[User]:
         """
         Find a user by their Steam ID
@@ -52,6 +72,39 @@ class UsersRepository:
             return None
     
     @staticmethod
+    def create_with_games(steam_id: int, data: Dict, games: Dict, login_count: int = 1) -> Optional[User]:
+        """
+        Create a new user with automatic games_array generation
+        
+        Args:
+            steam_id: User's Steam ID
+            data: Steam profile data
+            games: Games dictionary
+            login_count: Initial login count
+            
+        Returns:
+            Created User object or None on error
+        """
+        try:
+            insert_data = {
+                "steam_id": steam_id,
+                "data": data,
+                "login_count": login_count
+            }
+            
+            if games:
+                insert_data["games"] = games
+                insert_data["games_array"] = UsersRepository.generate_games_array(games)
+            
+            response = supabase.table('users').insert(insert_data).execute()
+            if response.data and len(response.data) > 0:
+                return User.model_validate(response.data[0])
+            return None
+        except Exception as e:
+            print(f"Error creating user with games: {str(e)}")
+            return None
+    
+    @staticmethod
     def update(steam_id: int, update_data: Dict[str, Any]) -> Optional[User]:
         """
         Update an existing user
@@ -77,6 +130,46 @@ class UsersRepository:
             return None
         except Exception as e:
             print(f"Error updating user {steam_id}: {str(e)}")
+            return None
+    
+    @staticmethod
+    def update_with_games(steam_id: int, data: Dict, games: Dict, increment_login: bool = True) -> Optional[User]:
+        """
+        Update user with profile data and games, auto-generating games_array
+        
+        Args:
+            steam_id: User's Steam ID
+            data: Steam profile data
+            games: Games dictionary
+            increment_login: Whether to increment login_count
+            
+        Returns:
+            Updated User object or None on error
+        """
+        try:
+            update_data = {
+                'data': data,
+                'games': games,
+                'games_array': UsersRepository.generate_games_array(games)
+            }
+            
+            if increment_login:
+                # Get current login count and increment
+                current_user = UsersRepository.find_by_steam_id(steam_id)
+                if current_user:
+                    update_data['login_count'] = current_user.login_count + 1
+                else:
+                    update_data['login_count'] = 1
+            
+            response = supabase.table('users').update(update_data).eq('steam_id', steam_id).execute()
+            
+            if response.data and len(response.data) > 0:
+                return User.model_validate(response.data[0])
+            else:
+                # If update didn't return data, fetch the user
+                return UsersRepository.find_by_steam_id(steam_id)
+        except Exception as e:
+            print(f"Error updating user {steam_id} with games: {str(e)}")
             return None
     
     @staticmethod
@@ -234,6 +327,7 @@ class UsersRepository:
             return []
     
     @staticmethod
+    @staticmethod
     def find_similar_users_batch(
         games_array: List[str],
         batch_size: int = 750,
@@ -348,6 +442,70 @@ class UsersRepository:
         except Exception as e:
             print(f"Error counting users: {str(e)}")
             return 0
+    
+    @staticmethod
+    async def user_login(steam_id: int, profile_data: Dict) -> Optional[Dict]:
+        """
+        Handle user login: create new user or update existing with fresh Steam data
+        
+        Args:
+            steam_id: User's Steam ID
+            profile_data: Profile data from Steam API (includes profile, games, games_array)
+            
+        Returns:
+            User data dictionary or None on error
+        """
+        try:
+            # Check if user exists
+            existing_user = UsersRepository.find_by_steam_id(steam_id)
+            
+            if existing_user:
+                # Update existing user
+                print(f"User {steam_id} exists, updating...")
+                updated_user = UsersRepository.update_with_games(
+                    steam_id=steam_id,
+                    data=profile_data['profile'],
+                    games=profile_data.get('games', {}),
+                    increment_login=True
+                )
+                return updated_user.model_dump() if updated_user else None
+            else:
+                # Create new user
+                print(f"Creating new user {steam_id}")
+                new_user = UsersRepository.create_with_games(
+                    steam_id=steam_id,
+                    data=profile_data['profile'],
+                    games=profile_data.get('games', {}),
+                    login_count=1
+                )
+                return new_user.model_dump() if new_user else None
+                
+        except Exception as e:
+            print(f"Error in user_login for {steam_id}: {str(e)}")
+            return None
+    
+    @staticmethod
+    async def refresh_user_steam_data(steam_id: int, profile_data: Dict) -> Optional[User]:
+        """
+        Refresh user data with fresh Steam profile data
+        
+        Args:
+            steam_id: User's Steam ID
+            profile_data: Fresh profile data from Steam API
+            
+        Returns:
+            Updated User object or None on error
+        """
+        try:
+            return UsersRepository.update_with_games(
+                steam_id=steam_id,
+                data=profile_data['profile'],
+                games=profile_data.get('games', {}),
+                increment_login=True
+            )
+        except Exception as e:
+            print(f"Error refreshing Steam data for {steam_id}: {str(e)}")
+            return None
     
     @staticmethod
     def delete(steam_id: int) -> bool:

@@ -4,8 +4,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from src.api import users
 from src.api.auth import router as auth_router
-from src.api.recommendations import router as recommendations_router, load_steam_dataset
+from src.api.recommendations import router as recommendations_router
 from src.api.collaborative_filtering import router as collaborative_filtering_router
+from src.services.ai_chatbot import initialize_ai_system
 
 app = FastAPI()
 
@@ -19,15 +20,20 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    """Load dataset on server startup for faster AI recommendations"""
-    print("🚀 Starting server initialization...")
-    print("📦 Loading Steam dataset for AI recommendations...")
+    """Initialize AI recommendation system at server startup for optimal performance"""
+    print("="*60)
+    print("🚀 Starting GameLib Backend Server...")
+    print("="*60)
     try:
-        await load_steam_dataset()
-        print("✅ Dataset loaded successfully! AI recommendations ready.")
+        await initialize_ai_system()
+        print("="*60)
+        print("✅ Server ready! AI recommendations fully optimized.")
+        print("="*60)
     except Exception as e:
-        print(f"❌ Warning: Failed to load dataset on startup: {e}")
-        print("⚠️  AI recommendations may be slower on first request.")
+        print("="*60)
+        print(f"⚠️  Warning: AI system initialization failed: {e}")
+        print("⚠️  Server will start but AI recommendations may be slower.")
+        print("="*60)
 
 app.include_router(auth_router, prefix="/api")
 app.include_router(users.router, prefix="/api")

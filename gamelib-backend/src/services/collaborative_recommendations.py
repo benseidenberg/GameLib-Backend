@@ -173,7 +173,7 @@ class CollaborativeRecommendationService:
                         seen_steam_ids.add(user_steam_id)
                         unique_batch_users.append(user)
                 
-                total_users_pulled += batch_size # Count actual users pulled (not batch_size)
+                total_users_pulled += batch_size 
                 print(f"  Pulled {len(batch_users)} users from database ({len(unique_batch_users)} unique, Total unique so far: {len(all_similar_users) + len(unique_batch_users)})")
                 
                 # If no unique users in this batch, skip ahead in pagination to find new users
