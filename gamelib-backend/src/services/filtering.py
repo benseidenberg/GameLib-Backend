@@ -214,6 +214,7 @@ class FilteringService:
     
     async def get_filtered_games(
         self,
+        game_ids: Optional[List[int]] = None,
         steam_genres: Optional[List[str]] = None,
         languages: Optional[List[str]] = None,
         steam_categories: Optional[List[str]] = None,
@@ -225,36 +226,47 @@ class FilteringService:
         min_negative_reviews: Optional[int] = None,
         max_price: Optional[float] = None,
         limit: int = 1000,
-        order_by: str = 'positive',
-        return_dict: bool = False
+        return_dict: bool = False,
+        apply_content_filter: bool = True
     ) -> Union[List['Game'], Dict[int, 'Game']]:
         """
         Get filtered games using batch processing (ALWAYS uses batching for performance)
         
+        Content filtering behavior:
+        - When filters ARE provided: Content filtering happens in find_by_filters (database layer)
+        - When NO filters provided: Content filtering should happen at API layer
+        
         Args:
-            game_ids: Optional list of specific game IDs to fetch. If None, fetches all matching filters.
+            game_ids: Optional list of specific game IDs to filter. If provided, only these games are considered.
             steam_genres: Filter by Steam genres
             languages: Filter by supported languages
             steam_categories: Filter by Steam categories
-            tags: Filter by tags
+            tags: Filter by tags (uses SQL array overlap)
             platforms: Filter by platforms (windows, mac, linux)
             min_release_date: Minimum release date (YYYY-MM-DD)
             max_release_date: Maximum release date (YYYY-MM-DD)
             min_positive_reviews: Minimum positive review count
             min_negative_reviews: Minimum negative review count
             max_price: Maximum price in USD
-            limit: Maximum number of games to return (ignored if return_dict=True)
-            order_by: Column to order by
+            limit: Maximum number of games to return (used as stop_limit)
             return_dict: If True, return Dict[int, Game]. If False, return List[Game]
+            apply_content_filter: If True, filters inappropriate content in database layer
             
         Returns:
             List[Game] or Dict[int, Game] depending on return_dict parameter
         """
         from src.schemas.game_schema import Game
         
-        # Use batch processing with find_by_filters_batch
-        print("DEBUG: Using batch processing for filtering games")
+        # Check if any filters are applied
+        has_filters = any([
+            steam_genres, tags, steam_categories, languages, platforms,
+            min_positive_reviews, min_negative_reviews, max_price
+        ])
+        
+        # Use batch processing with find_by_filters
+        print(f"DEBUG: Filtering games with game_ids={len(game_ids) if game_ids else 'None'}, has_filters={has_filters}")
         games = self.games_repo.find_by_filters(
+            game_ids=game_ids,
             genres=steam_genres,
             tags=tags,
             categories=steam_categories,
@@ -264,37 +276,19 @@ class FilteringService:
             max_price=max_price,
             min_positive=min_positive_reviews,
             min_negative=min_negative_reviews,
-            order_by=order_by
+            stop_limit=limit if not return_dict else None,
+            apply_content_filter=apply_content_filter and has_filters  # Only apply if filters exist
         )
         
-        # Apply content filtering and additional filters
+        # Apply additional filters (date filters not in SQL)
         filtered_games = []
         filtered_dict = {}
         
         for game in games:
-            # Build game data for content check
-            game_data = {
-                'name': game.name,
-                'short_description': game.short_description or '',
-                'content_descriptors': game.content or {},
-                'content': game.content or {},
-                'required_age': game.required_age or 0,
-                'tags': game.tags,
-                'categories': game.categories,
-                'genres': game.genres
-            }
-            
-            if not self.is_content_appropriate(game_data):
-                continue
-            
-            # Apply additional filters
+            # Apply date filters
             if min_release_date and game.release_date and game.release_date < min_release_date:
                 continue
             if max_release_date and game.release_date and game.release_date > max_release_date:
-                continue
-            if min_positive_reviews and game.positive is not None and game.positive < min_positive_reviews:
-                continue
-            if min_negative_reviews and game.negative is not None and game.negative < min_negative_reviews:
                 continue
             
             if return_dict:

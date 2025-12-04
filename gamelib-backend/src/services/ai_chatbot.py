@@ -3,15 +3,18 @@ AI Chatbot Service
 Handles AI-powered game recommendations using OpenAI and machine learning
 """
 import os
+import pickle
 import openai
 import pandas as pd
 from typing import Dict, Any, List, Optional, Union, Type
 import re
 import json
+from pathlib import Path
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from datasets import load_dataset
 from fastapi import HTTPException
+from src.services.filtering import FilteringService
 
 # Get OpenAI API key from environment variables
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -20,6 +23,12 @@ if not OPENAI_API_KEY:
 
 # Initialize OpenAI client
 openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+# Path for pickle files
+SERVICES_DIR = Path(__file__).parent
+VECTORIZER_PATH = SERVICES_DIR / "tfidf_vectorizer.pkl"
+MATRIX_PATH = SERVICES_DIR / "tfidf_matrix.pkl"
+DATASET_PATH = SERVICES_DIR / "steam_dataset.pkl"
 
 # Global variables to cache the dataset and TF-IDF vectors
 _steam_dataset = None
@@ -136,7 +145,7 @@ async def load_steam_dataset() -> Optional[pd.DataFrame]:
             # Properly concatenate pandas Series with spaces
             _steam_dataset['combined_text'] = text_parts[0]
             for i in range(1, len(text_parts)):
-                _steam_dataset['combined_text'] = _steam_dataset['combined_text'] + " " + text_parts[i]
+                _steam_dataset['combined_text'] = _steam_dataset['combined_text'].astype(str) + " " + text_parts[i].astype(str)
         else:
             # Fallback: use all string columns
             print("DEBUG: Using all string columns for combined text")
@@ -169,15 +178,58 @@ async def load_steam_dataset() -> Optional[pd.DataFrame]:
         raise HTTPException(status_code=500, detail=f"Error loading game dataset: {str(e)}")
 
 
-async def initialize_ai_system():
+async def initialize_ai_system(force_recalculate: bool = False):
     """
     Initialize the AI recommendation system by loading dataset and precomputing TF-IDF vectors.
     This should be called once at server startup for optimal performance.
+    
+    Args:
+        force_recalculate: If True, recalculates TF-IDF vectors even if pickle files exist
     """
     global _steam_dataset, _dataset_loaded, _tfidf_vectorizer, _tfidf_matrix, _vectors_initialized
     
     try:
         print("🔄 Initializing AI recommendation system...")
+        
+        # Check if pickle files exist and should be used
+        if not force_recalculate and VECTORIZER_PATH.exists() and MATRIX_PATH.exists() and DATASET_PATH.exists():
+            print("📂 Found cached TF-IDF files, loading from disk...")
+            try:
+                # Load dataset
+                with open(DATASET_PATH, 'rb') as f:
+                    _steam_dataset = pickle.load(f)
+                print(f"✅ Dataset loaded from cache: {len(_steam_dataset)} games")
+                
+                # Load vectorizer
+                with open(VECTORIZER_PATH, 'rb') as f:
+                    _tfidf_vectorizer = pickle.load(f)
+                print(f"✅ TF-IDF vectorizer loaded from cache")
+                
+                # Load matrix
+                with open(MATRIX_PATH, 'rb') as f:
+                    _tfidf_matrix = pickle.load(f)
+                print(f"✅ TF-IDF matrix loaded from cache: {_tfidf_matrix.shape[0]} games, {_tfidf_matrix.shape[1]} features")
+                
+                _dataset_loaded = True
+                _vectors_initialized = True
+                
+                print("🚀 AI recommendation system ready (loaded from cache)!")
+                return {
+                    "status": "success",
+                    "dataset_size": len(_steam_dataset),
+                    "vector_dimensions": _tfidf_matrix.shape[1],
+                    "message": "AI system initialized successfully from cache",
+                    "cached": True
+                }
+            except Exception as e:
+                print(f"⚠️  Error loading cached files: {e}")
+                print("🔄 Falling back to recalculation...")
+                force_recalculate = True
+        
+        if force_recalculate:
+            print("🔄 Force recalculation enabled, computing from scratch...")
+        else:
+            print("📦 No cached files found, computing from scratch...")
         
         # Step 1: Load the dataset
         print("📦 Loading Steam games dataset...")
@@ -222,13 +274,33 @@ async def initialize_ai_system():
         
         _vectors_initialized = True
         print(f"✅ TF-IDF vectors computed: {_tfidf_matrix.shape[0]} games, {_tfidf_matrix.shape[1]} features")
+        
+        # Step 4: Save to pickle files for future use
+        print("💾 Saving TF-IDF data to disk for faster future startups...")
+        try:
+            with open(DATASET_PATH, 'wb') as f:
+                pickle.dump(_steam_dataset, f)
+            print(f"✅ Dataset saved to {DATASET_PATH.name}")
+            
+            with open(VECTORIZER_PATH, 'wb') as f:
+                pickle.dump(_tfidf_vectorizer, f)
+            print(f"✅ Vectorizer saved to {VECTORIZER_PATH.name}")
+            
+            with open(MATRIX_PATH, 'wb') as f:
+                pickle.dump(_tfidf_matrix, f)
+            print(f"✅ Matrix saved to {MATRIX_PATH.name}")
+        except Exception as e:
+            print(f"⚠️  Warning: Could not save pickle files: {e}")
+            print("⚠️  System will work but will recalculate on next startup")
+        
         print("🚀 AI recommendation system ready!")
         
         return {
             "status": "success",
             "dataset_size": len(dataset),
             "vector_dimensions": _tfidf_matrix.shape[1],
-            "message": "AI system initialized successfully"
+            "message": "AI system initialized successfully",
+            "cached": False
         }
         
     except Exception as e:
@@ -732,10 +804,18 @@ async def find_similar_games(
         
         # Extract top games with additional filtering
         results = []
-        for candidate in candidates[:limit*2]:  # Get extra to allow for price filtering
+        checked_count = 0
+        max_to_check = limit * 10  # Check up to 10x the limit to ensure we get enough appropriate games
+        
+        for candidate in candidates:
             if len(results) >= limit:
                 break
-                
+            
+            if checked_count >= max_to_check:
+                print(f"DEBUG: Reached max check limit ({max_to_check}), stopping search")
+                break
+            
+            checked_count += 1
             game = candidate['game']
             similarity_score = candidate['similarity']
             
@@ -777,6 +857,22 @@ async def find_similar_games(
                             continue
                     except ValueError:
                         pass
+            
+            # Apply content appropriateness filtering
+            game_content_data = {
+                'name': game_info['name'],
+                'short_description': game_info['description'],
+                'content_descriptors': {},
+                'content': {},
+                'required_age': game_info['required_age'],
+                'tags': game_info['tags'],
+                'categories': game_info['categories'],
+                'genres': game_info['genres']
+            }
+            
+            if not FilteringService.is_content_appropriate(game_content_data):
+                print(f"DEBUG: Filtered out inappropriate content: {game_info['name']}")
+                continue
             
             results.append(game_info)
         

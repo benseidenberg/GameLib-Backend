@@ -104,9 +104,94 @@ async def get_collaborative_filtering_recommendations(
             min_negative_reviews, max_price
         ])
         
-        if has_filters:
-            # Use filtering service to get games matching filters
-            result_from_filter = await filtering_service.get_filtered_games(
+        # Step 1: Get recommended game_ids from collaborative filtering
+        recommended_game_ids = [rec["game_id"] for rec in result.get("recommendations", [])]
+        
+        if not recommended_game_ids:
+            return {
+                "success": True,
+                "recommendations": [],
+                "similar_users": result.get("similar_users", []),
+                "user_top_games": result.get("user_top_games", []),
+                "total_users_analyzed": result.get("total_users_analyzed", 0),
+                "message": "No recommendations found"
+            }
+        
+        # Create recommendation score map for later sorting
+        rec_scores = {
+            rec["game_id"]: {
+                "recommendation_score": rec["recommendation_score"],
+                "recommended_by_count": rec["recommended_by_count"]
+            }
+            for rec in result.get("recommendations", [])
+        }
+        
+        # Set target count early for use in queries
+        target_count = max_recommendations or 20
+        
+        # Step 2: Filter recommended games by game_ids + filters
+        # Content filtering happens in find_by_filters when filters are present
+        print(f"DEBUG: Filtering {len(recommended_game_ids)} recommended games with filters")
+        result_from_filter = await filtering_service.get_filtered_games(
+            game_ids=recommended_game_ids,
+            steam_genres=steam_genres,
+            languages=languages,
+            steam_categories=steam_categories,
+            tags=tags,
+            platforms=platforms,
+            min_release_date=min_release_date,
+            max_release_date=max_release_date,
+            min_positive_reviews=min_positive_reviews,
+            min_negative_reviews=min_negative_reviews,
+            max_price=max_price,
+            limit=target_count * 3,  # Get extra for sorting and limiting
+            return_dict=False,
+            apply_content_filter=True  # Content filter in DB layer
+        )
+        
+        filtered_games: List[Game] = cast(List[Game], result_from_filter)
+        print(f"DEBUG: After DB filtering: {len(filtered_games)} games")
+        for game in filtered_games[:5]:
+            print(f"  - {game.game_id}: {game.name}")
+        
+        # Step 3: Content filtering (only if NO filters were applied)
+        # When filters exist, content filtering already happened in find_by_filters
+        content_filtered_games = []
+        if not has_filters:
+            print(f"DEBUG: No filters - applying content filtering to {len(filtered_games)} games")
+            for game in filtered_games:
+                game_data = {
+                    'name': game.name,
+                    'short_description': game.short_description or '',
+                    'content_descriptors': game.content or {},
+                    'content': game.content or {},
+                    'required_age': game.required_age or 0,
+                    'tags': game.tags,
+                    'categories': game.categories,
+                    'genres': game.genres
+                }
+                
+                if filtering_service.is_content_appropriate(game_data):
+                    content_filtered_games.append(game)
+            print(f"DEBUG: After content filtering but no game filters: {len(content_filtered_games)} games")
+        else:
+            # Filters were applied, content already filtered in DB
+            print(f"DEBUG: Filters applied - content already filtered, {len(filtered_games)} games")
+            content_filtered_games = filtered_games
+        
+        # Step 4: Backfill if we don't have enough games
+        target_count = max_recommendations or 20
+        if len(content_filtered_games) < target_count:
+            needed_count = target_count - len(content_filtered_games)
+            print(f"DEBUG: Need {needed_count} more games, fetching additional matches")
+            
+            # Get already included game_ids to avoid duplicates
+            existing_game_ids = {game.game_id for game in content_filtered_games}
+            
+            # Fetch additional games WITHOUT game_id restriction
+            # stop_limit prevents searching forever
+            additional_games_result = await filtering_service.get_filtered_games(
+                game_ids=None,  # Open query
                 steam_genres=steam_genres,
                 languages=languages,
                 steam_categories=steam_categories,
@@ -117,99 +202,52 @@ async def get_collaborative_filtering_recommendations(
                 min_positive_reviews=min_positive_reviews,
                 min_negative_reviews=min_negative_reviews,
                 max_price=max_price,
-                limit=500
+                limit=needed_count + 50,  # stop_limit: get a bit extra for deduplication
+                return_dict=False,
+                apply_content_filter=True  # Content filter in DB
             )
             
-            # Type assertion: return_dict=False (default) returns List[Game]
-            all_filtered_games: List[Game] = cast(List[Game], result_from_filter)
+            additional_games: List[Game] = cast(List[Game], additional_games_result)
             
-            if not all_filtered_games:
-                return {
-                    "success": True,
-                    "recommendations": [],
-                    "similar_users": result.get("similar_users", []),
-                    "user_top_games": result.get("user_top_games", []),
-                    "total_users_analyzed": result.get("total_users_analyzed", 0),
-                    "message": "No games found matching filters"
-                }
+            # Add non-duplicate games
+            for game in additional_games:
+                if game.game_id in existing_game_ids:
+                    continue  # Skip duplicates
+                
+                if len(content_filtered_games) >= target_count:
+                    break
+                
+                content_filtered_games.append(game)
+                existing_game_ids.add(game.game_id)
             
-            # Map recommendation scores
-            rec_scores = {
-                rec["game_id"]: {
-                    "recommendation_score": rec["recommendation_score"],
-                    "recommended_by_count": rec["recommended_by_count"]
-                }
-                for rec in result.get("recommendations", [])
-            }
-            
-            # Prioritize games that are in recommendations
-            recommended_filtered = []
-            other_filtered = []
-            
-            for game in all_filtered_games:
-                if game.game_id in rec_scores:
-                    # Create new Game instance with recommendation metadata
-                    game_with_rec = game.model_copy(update={
-                        'recommendation_score': rec_scores[game.game_id]["recommendation_score"],
-                        'recommended_by_count': rec_scores[game.game_id]["recommended_by_count"]
-                    })
-                    recommended_filtered.append(game_with_rec)
-                else:
-                    # Create Game instance with zero recommendation scores
-                    game_with_rec = game.model_copy(update={
-                        'recommendation_score': 0,
-                        'recommended_by_count': 0
-                    })
-                    other_filtered.append(game_with_rec)
-            
-            # Sort and combine
-            recommended_filtered.sort(key=lambda x: x.recommendation_score or 0, reverse=True)
-            final_recommendations = recommended_filtered[:max_recommendations or 20]
-            
-            # Fill remaining slots
-            remaining = (max_recommendations or 20) - len(final_recommendations)
-            if remaining > 0:
-                final_recommendations.extend(other_filtered[:remaining])
-            final_recommendations.sort(key=lambda x: x.recommendation_score or 0, reverse=True)
-            
-            return {
-                "success": True,
-                "recommendations": [game.model_dump() for game in final_recommendations],
-                "similar_users": result.get("similar_users", []),
-                "user_top_games": result.get("user_top_games", []),
-                "total_users_analyzed": result.get("total_users_analyzed", 0)
-            }
+            print(f"DEBUG: After backfill: {len(content_filtered_games)} games total")
         
-        # No filters - get game details for recommended game_ids
-        recommended_game_ids = [rec["game_id"] for rec in result.get("recommendations", [])]
-        
-        db_games_list = GamesRepository.find_by_ids(recommended_game_ids)
-        
-        # Convert list to dict for fast lookup
-        db_games: Dict[int, Dict] = {game['game_id']: game for game in db_games_list}
-        
-        # Build final recommendations list
-        recommendations_with_details = []
-        for rec in result.get("recommendations", []):
-            if len(recommendations_with_details) >= (max_recommendations or 20):
-                break
-            
-            game_id = rec["game_id"]
-            if game_id in db_games:
-                game_data = db_games[game_id]
-                # Convert to Game object
-                game = Game.model_validate(game_data)
-                # Create Game with recommendation metadata
+        # Step 5: Add recommendation metadata and sort by recommended_by_count
+        final_recommendations = []
+        for game in content_filtered_games:
+            if game.game_id in rec_scores:
+                # Game from collaborative filtering - use actual scores
                 game_with_rec = game.model_copy(update={
-                    'recommendation_score': rec["recommendation_score"],
-                    'recommended_by_count': rec["recommended_by_count"]
+                    'recommendation_score': rec_scores[game.game_id]["recommendation_score"],
+                    'recommended_by_count': rec_scores[game.game_id]["recommended_by_count"]
                 })
-                recommendations_with_details.append(game_with_rec.model_dump())
-                recommendations_with_details.sort(key=lambda x: x.get('recommendation_score', 0), reverse=True)
+            else:
+                # Backfill game - assign default scores
+                game_with_rec = game.model_copy(update={
+                    'recommendation_score': 0,
+                    'recommended_by_count': 0
+                })
+            final_recommendations.append(game_with_rec)
+        
+        # Sort by recommended_by_count (number of users who play each game)
+        final_recommendations.sort(key=lambda x: x.recommended_by_count or 0, reverse=True)
+        
+        # Limit to max_recommendations
+        final_recommendations = final_recommendations[:target_count]
         
         return {
             "success": True,
-            "recommendations": recommendations_with_details,
+            "recommendations": [game.model_dump() for game in final_recommendations],
             "similar_users": result.get("similar_users", []),
             "user_top_games": result.get("user_top_games", []),
             "total_users_analyzed": result.get("total_users_analyzed", 0)

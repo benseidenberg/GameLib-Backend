@@ -254,6 +254,7 @@ class GamesRepository:
     
     @staticmethod
     def find_by_filters(
+        game_ids: Optional[List[int]] = None,
         genres: Optional[List[str]] = None,
         tags: Optional[List[str]] = None,
         categories: Optional[List[str]] = None,
@@ -266,6 +267,8 @@ class GamesRepository:
         order_by: str = 'positive',
         ascending: bool = False,
         batch_size: int = 50,
+        stop_limit: Optional[int] = None,
+        apply_content_filter: bool = True,
     ) -> List['Game']:
         """
         Find games matching multiple filters using SQL queries
@@ -279,7 +282,7 @@ class GamesRepository:
         - CREATE INDEX idx_games_price ON games_db (price);
         
         Args:
-            game_ids: Filter by specific game_ids (most selective)
+            game_ids: Filter by specific game_ids (NO start_index used when provided)
             genres: Filter by genres (array overlap)
             tags: Filter by tags (array overlap)
             categories: Filter by categories (array overlap)
@@ -289,15 +292,18 @@ class GamesRepository:
             max_price: Maximum price
             min_positive: Minimum positive reviews
             min_negative: Minimum negative reviews
-            limit: Maximum results
             order_by: Column to order by
             ascending: Sort direction
+            batch_size: Batch size for pagination
+            stop_limit: Stop when this many games are found (prevents long searches)
+            apply_content_filter: If True, filters out inappropriate content
             
         Returns:
             List of Game objects matching filters
         """
         try:
             print("DEBUG: Starting find_by_filters with parameters: ", {
+                "game_ids_count": len(game_ids) if game_ids else None,
                 "genres": genres,
                 "tags": tags,
                 "categories": categories,
@@ -308,12 +314,39 @@ class GamesRepository:
                 "min_positive": min_positive,
                 "min_negative": min_negative,
                 "ascending": ascending,
-                "batch_size": batch_size
+                "batch_size": batch_size,
+                "stop_limit": stop_limit,
+                "apply_content_filter": apply_content_filter
             })
+            
+            # If game_ids provided, NO start_index - just query those specific IDs
+            if game_ids is not None:
+                print(f"DEBUG: Querying specific {len(game_ids)} game_ids (no pagination)")
+                batch_games = GamesRepository.find_by_filters_batch(
+                    game_ids=game_ids,
+                    start_index=None,  # NO start_index when game_ids provided
+                    batch_size=len(game_ids),  # Get all of them
+                    genres=genres,
+                    tags=tags,
+                    categories=categories,
+                    languages=languages,
+                    platforms=platforms,
+                    min_price=min_price,
+                    max_price=max_price,
+                    min_positive=min_positive,
+                    min_negative=min_negative,
+                    order_by=order_by,
+                    ascending=ascending,
+                    apply_content_filter=apply_content_filter
+                )
+                return batch_games
+            
+            # Regular pagination when no game_ids specified
             filtered_games = []
             start_index = 0
             while True:
                 batch_games = GamesRepository.find_by_filters_batch(
+                    game_ids=None,
                     start_index=start_index,
                     batch_size=batch_size,
                     genres=genres,
@@ -326,7 +359,8 @@ class GamesRepository:
                     min_positive=min_positive,
                     min_negative=min_negative,
                     order_by=order_by,
-                    ascending=ascending
+                    ascending=ascending,
+                    apply_content_filter=apply_content_filter
                 )
                 
                 if not batch_games:
@@ -334,10 +368,17 @@ class GamesRepository:
                 
                 filtered_games.extend(batch_games)
                 
+                # Stop if we've reached the stop_limit
+                if stop_limit and len(filtered_games) >= stop_limit:
+                    print(f"DEBUG: Reached stop_limit of {stop_limit}, stopping search")
+                    filtered_games = filtered_games[:stop_limit]
+                    break
+                
                 if len(batch_games) < batch_size:
                     break
                 
                 start_index += batch_size
+            
             return filtered_games
         except Exception as e:
             print(f"Error finding games by filters: {str(e)}")
@@ -345,8 +386,9 @@ class GamesRepository:
     
     @staticmethod
     def find_by_filters_batch(
-        start_index: int,
         batch_size: int,
+        start_index: Optional[int] = None,
+        game_ids: Optional[List[int]] = None,
         genres: Optional[List[str]] = None,
         tags: Optional[List[str]] = None,
         categories: Optional[List[str]] = None,
@@ -357,20 +399,22 @@ class GamesRepository:
         min_positive: Optional[int] = None,
         min_negative: Optional[int] = None,
         order_by: str = 'positive',
-        ascending: bool = False
+        ascending: bool = False,
+        apply_content_filter: bool = True
     ) -> List['Game']:
         """
         Fetch games with filters applied using batch processing (ALWAYS uses batching)
         Used for all filtering operations for consistent performance
         
-        Processes games_db in batches using start_index and batch_size for pagination.
-        Returns empty list if no games found at the given start_index.
+        When game_ids is provided: NO start_index used, queries only those specific IDs
+        When game_ids is None: Uses start_index for pagination
         
         Args:
-            start_index: Starting offset for pagination
             batch_size: Number of records to fetch in this batch
+            start_index: Starting offset for pagination (IGNORED if game_ids provided)
+            game_ids: Specific game IDs to query (NO pagination when provided)
             genres: Filter by genres
-            tags: Filter by tags
+            tags: Filter by tags (uses SQL array overlap)
             categories: Filter by categories
             languages: Filter by languages
             platforms: Filter by platforms
@@ -387,121 +431,20 @@ class GamesRepository:
         try:
             from src.schemas.game_schema import Game
             
-            print(f"DEBUG: find_by_filters_batch - start_index={start_index}, batch_size={batch_size}, order_by={order_by}")
-                
+            from src.services.filtering import FilteringService
+            
             query = supabase.table('games_db').select('*')
             
-            # CRITICAL OPTIMIZATION: For array overlap queries without numeric filters,
-            # we need to limit the working set to avoid full table scans
-            # Strategy: Apply ordering and limit first, then filter in memory
-            
-            # Check if we have any selective numeric filters
-            has_numeric_filters = any([
-                min_positive is not None,
-                min_negative is not None,
-                min_price is not None,
-                max_price is not None
-            ])
-            
-            # If we only have array filters (tags, genres) without numeric filters,
-            # use a different strategy to avoid timeout
-            if not has_numeric_filters and (tags or genres or categories or languages):
-                print(f"DEBUG: Using optimized strategy for array-only filters")
-                # CRITICAL: Fetch a large batch WITHOUT array filters in SQL
-                # Then filter in Python (much faster than SQL array overlap without indexes)
-                
-                # Calculate how many raw games we likely need to fetch
-                # to get batch_size filtered results after applying our filters
-                # Estimate: 10-20% of games match typical tag filters
-                estimated_match_rate = 0.15
-                estimated_fetch_size = int((start_index + batch_size) / estimated_match_rate)
-                
-                # Cap the fetch size to avoid memory issues
-                max_fetch_size = 2000
-                fetch_limit = min(estimated_fetch_size, max_fetch_size)
-                
-                print(f"DEBUG: Fetching up to {fetch_limit} games to filter in Python (need {batch_size} after filtering)")
-                
-                # Fetch WITHOUT array filters (fast!)
-                query = query.order(order_by, desc=not ascending)
-                query = query.limit(fetch_limit)
-                
-                response = query.execute()
-                
-                if not response.data:
+            # If filtering by specific game_ids, add that filter first (most selective)
+            # NO start_index used when game_ids provided
+            if game_ids is not None:
+                if len(game_ids) == 0:
                     return []
-                
-                print(f"DEBUG: Fetched {len(response.data)} raw games, now filtering in Python")
-                
-                # Filter in Python
-                filtered_games = []
-                filtered_count = 0  # Count of games that passed filters
-                
-                # Filter in Python
-                filtered_games = []
-                filtered_count = 0  # Count of games that passed filters
-                
-                for game_data in response.data:
-                    
-                    # Check array filters - if doesn't match, skip
-                    matches = True
-                    
-                    if genres:
-                        game_genres = game_data.get('genres', []) or []
-                        if not any(g in game_genres for g in genres):
-                            matches = False
-                    
-                    if matches and tags:
-                        game_tags = game_data.get('tags', []) or []
-                        if not any(t in game_tags for t in tags):
-                            matches = False
-                    
-                    if matches and categories:
-                        game_categories = game_data.get('categories', []) or []
-                        if not any(c in game_categories for c in categories):
-                            matches = False
-                    
-                    if matches and languages:
-                        game_languages = game_data.get('languages', []) or []
-                        if not any(l in game_languages for l in languages):
-                            matches = False
-                    
-                    # Check platform filters
-                    if matches and platforms:
-                        matches_platform = False
-                        for platform in platforms:
-                            if platform.lower() == 'windows' and game_data.get('windows'):
-                                matches_platform = True
-                                break
-                            elif platform.lower() == 'mac' and game_data.get('mac'):
-                                matches_platform = True
-                                break
-                            elif platform.lower() == 'linux' and game_data.get('linux'):
-                                matches_platform = True
-                                break
-                        if not matches_platform:
-                            matches = False
-                    
-                    if not matches:
-                        continue
-                    
-                    # This game matches all filters
-                    filtered_count += 1
-                    
-                    # Skip until we reach start_index (in terms of filtered results)
-                    if filtered_count <= start_index:
-                        continue
-                    
-                    # Add to results
-                    filtered_games.append(Game.model_validate(game_data))
-                    
-                    if len(filtered_games) >= batch_size:
-                        break
-                
-                print(f"DEBUG: Python filtering found {filtered_count} matching games total, returning {len(filtered_games)} for this batch")
-                return filtered_games
+                print(f"DEBUG: Filtering by {len(game_ids)} specific game_ids (no start_index)")
+                query = query.in_('game_id', game_ids)
+            else:
+                print(f"DEBUG: find_by_filters_batch - start_index={start_index}, batch_size={batch_size}, order_by={order_by}")
             
-            # Original SQL filtering path for queries with numeric filters
             # 1. Apply numeric filters (fast with indexes)
             if min_positive is not None:
                 query = query.gte('positive', min_positive)
@@ -512,50 +455,73 @@ class GamesRepository:
             if max_price is not None:
                 query = query.lte('price_usd', max_price)
             
-            # 2. Platform filters (boolean columns - indexed)
+            # 2. Platform filters (JSONB column)
+            # Query platforms JSONB column: {"mac":true, "windows":false, "linux":true}
             if platforms:
                 for platform in platforms:
-                    if platform.lower() == 'windows':
-                        query = query.eq('windows', True)
-                    elif platform.lower() == 'mac':
-                        query = query.eq('mac', True)
-                    elif platform.lower() == 'linux':
-                        query = query.eq('linux', True)
-            
-            # 3. Array overlap filters (requires GIN indexes for performance)
+                    platform_key = platform.lower()
+                    if platform_key in ['windows', 'mac', 'linux']:
+                        # Use JSONB containment operator to check if platform is true
+                        query = query.filter('platforms', 'cs', f'{{"{platform_key}":true}}')
+                            
+            # 3. Array contains filters (AND logic - must contain ALL specified items)
             # Format arrays as PostgreSQL array literals: {item1,item2,item3}
+            # Uses 'cs' (contains) operator for AND filtering instead of 'ov' (overlaps) for OR
             if genres:
                 array_literal = '{' + ','.join(f'"{g}"' for g in genres) + '}'
-                query = query.filter('genres', 'ov', array_literal)
+                query = query.filter('genres', 'cs', array_literal)
             if tags:
                 array_literal = '{' + ','.join(f'"{t}"' for t in tags) + '}'
-                query = query.filter('tags', 'ov', array_literal)
+                query = query.filter('tags', 'cs', array_literal)
             if categories:
                 array_literal = '{' + ','.join(f'"{c}"' for c in categories) + '}'
-                query = query.filter('categories', 'ov', array_literal)
+                query = query.filter('categories', 'cs', array_literal)
             if languages:
                 array_literal = '{' + ','.join(f'"{l}"' for l in languages) + '}'
-                query = query.filter('languages', 'ov', array_literal)
+                query = query.filter('languages', 'cs', array_literal)
             
-            # 4. CRITICAL: Apply ordering BEFORE range for proper pagination
+            # 4. CRITICAL: Apply ordering BEFORE pagination
             query = query.order(order_by, desc=not ascending)
             
-            # 5. Apply pagination with range
-            query = query.range(start_index, start_index + batch_size - 1)
+            # 5. Apply pagination (only if NOT filtering by game_ids)
+            if game_ids is None and start_index is not None:
+                query = query.range(start_index, start_index + batch_size - 1)
+            elif game_ids is None:
+                # No start_index, just limit
+                query = query.limit(batch_size)
+            # else: game_ids provided, no pagination needed
             
             print(f"DEBUG: Executing query with filters applied")
             response = query.execute()
             print(f"DEBUG: Query returned {len(response.data) if response.data else 0} games")
             
-            # Convert to Game objects
-            if response.data:
-                return [Game.model_validate(game_data) for game_data in response.data]
-            return []
+            if not response.data:
+                return []
             
             # Convert to Game objects
-            if response.data:
-                return [Game.model_validate(game_data) for game_data in response.data]
-            return []
+            games = [Game.model_validate(game_data) for game_data in response.data]
+            
+            # Apply content filtering if requested
+            if apply_content_filter:
+                print(f"DEBUG: Applying content filter to {len(games)} games")
+                filtered_games = []
+                for game in games:
+                    game_data = {
+                        'name': game.name,
+                        'short_description': game.short_description or '',
+                        'content_descriptors': game.content or {},
+                        'content': game.content or {},
+                        'required_age': game.required_age or 0,
+                        'tags': game.tags,
+                        'categories': game.categories,
+                        'genres': game.genres
+                    }
+                    if FilteringService.is_content_appropriate(game_data):
+                        filtered_games.append(game)
+                print(f"DEBUG: After content filtering: {len(filtered_games)} games")
+                return filtered_games
+            
+            return games
             
         except Exception as e:
             print(f"Error finding games by filters batch: {str(e)}")
@@ -585,28 +551,27 @@ class GamesRepository:
         try:
             query = supabase.table('games_db').select('game_id')
             
-            # Array overlap filters using PostgreSQL array literals: {item1,item2,item3}
+            # Array contains filters (AND logic - must contain ALL specified items)
+            # Uses 'cs' (contains) operator for AND filtering instead of 'ov' (overlaps) for OR
             if genres:
                 array_literal = '{' + ','.join(f'"{g}"' for g in genres) + '}'
-                query = query.filter('genres', 'ov', array_literal)
+                query = query.filter('genres', 'cs', array_literal)
             if tags:
                 array_literal = '{' + ','.join(f'"{t}"' for t in tags) + '}'
-                query = query.filter('tags', 'ov', array_literal)
+                query = query.filter('tags', 'cs', array_literal)
             if categories:
                 array_literal = '{' + ','.join(f'"{c}"' for c in categories) + '}'
-                query = query.filter('categories', 'ov', array_literal)
+                query = query.filter('categories', 'cs', array_literal)
             if languages:
                 array_literal = '{' + ','.join(f'"{l}"' for l in languages) + '}'
-                query = query.filter('languages', 'ov', array_literal)
+                query = query.filter('languages', 'cs', array_literal)
             
             if platforms:
                 for platform in platforms:
-                    if platform.lower() == 'windows':
-                        query = query.eq('windows', True)
-                    elif platform.lower() == 'mac':
-                        query = query.eq('mac', True)
-                    elif platform.lower() == 'linux':
-                        query = query.eq('linux', True)
+                    platform_key = platform.lower()
+                    if platform_key in ['windows', 'mac', 'linux']:
+                        # Use JSONB containment operator to check if platform is true
+                        query = query.filter('platforms', 'cs', f'{{"{platform_key}":true}}')
             
             if min_price is not None:
                 query = query.gte('price', min_price)
@@ -664,10 +629,10 @@ class GamesRepository:
             
             query = supabase.table('games_db').select('*')
             
-            # Apply tag filter if provided
+            # Apply tag filter if provided (AND logic)
             if tags:
                 array_literal = '{' + ','.join(f'"{t}"' for t in tags) + '}'
-                query = query.filter('tags', 'ov', array_literal)
+                query = query.filter('tags', 'cs', array_literal)
             
             # Apply ordering
             query = query.order(order_by, desc=True)

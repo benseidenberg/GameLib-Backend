@@ -27,6 +27,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+*.pkl
 
 # Virtual Environment
 *venv/
