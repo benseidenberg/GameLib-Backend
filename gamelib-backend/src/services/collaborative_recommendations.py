@@ -22,7 +22,7 @@ class CollaborativeRecommendationService:
         min_playtime: int = 60,
         max_total_users: int = 1000,
         max_recommendations: int = 20,
-        batch_size: int = 750,
+        batch_size: int = 500,
         max_batches: int = 50
     ) -> Dict:
         """

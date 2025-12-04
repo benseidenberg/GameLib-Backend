@@ -109,6 +109,11 @@ src/
 
 5. Run the server:
    ```bash
+   uvicorn src.main:app --host 0.0.0.0 --port 8000
+   ```
+
+   For development with auto-reload (slower):
+   ```bash
    uvicorn src.main:app --reload
    ```
 

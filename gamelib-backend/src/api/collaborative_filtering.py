@@ -3,9 +3,11 @@ Collaborative Filtering API Routes
 HTTP endpoints for collaborative filtering recommendations
 """
 from fastapi import APIRouter, HTTPException, Query
-from typing import Optional, List
+from typing import Dict, Optional, List, cast
 from src.services.collaborative_recommendations import CollaborativeRecommendationService
 from src.services.filtering import FilteringService
+from src.schemas.game_schema import Game
+from src.db.repositories.games_db import GamesRepository
 import httpx
 
 router = APIRouter()
@@ -104,7 +106,7 @@ async def get_collaborative_filtering_recommendations(
         
         if has_filters:
             # Use filtering service to get games matching filters
-            all_filtered_games = await filtering_service.get_filtered_games(
+            result_from_filter = await filtering_service.get_filtered_games(
                 steam_genres=steam_genres,
                 languages=languages,
                 steam_categories=steam_categories,
@@ -117,6 +119,9 @@ async def get_collaborative_filtering_recommendations(
                 max_price=max_price,
                 limit=500
             )
+            
+            # Type assertion: return_dict=False (default) returns List[Game]
+            all_filtered_games: List[Game] = cast(List[Game], result_from_filter)
             
             if not all_filtered_games:
                 return {
@@ -165,6 +170,7 @@ async def get_collaborative_filtering_recommendations(
             remaining = (max_recommendations or 20) - len(final_recommendations)
             if remaining > 0:
                 final_recommendations.extend(other_filtered[:remaining])
+            final_recommendations.sort(key=lambda x: x.recommendation_score or 0, reverse=True)
             
             return {
                 "success": True,
@@ -177,9 +183,10 @@ async def get_collaborative_filtering_recommendations(
         # No filters - get game details for recommended game_ids
         recommended_game_ids = [rec["game_id"] for rec in result.get("recommendations", [])]
         
-        db_games = await filtering_service.get_filtered_games_batch(
-            game_ids=recommended_game_ids
-        )
+        db_games_list = GamesRepository.find_by_ids(recommended_game_ids)
+        
+        # Convert list to dict for fast lookup
+        db_games: Dict[int, Dict] = {game['game_id']: game for game in db_games_list}
         
         # Build final recommendations list
         recommendations_with_details = []
@@ -189,13 +196,16 @@ async def get_collaborative_filtering_recommendations(
             
             game_id = rec["game_id"]
             if game_id in db_games:
-                game = db_games[game_id]
+                game_data = db_games[game_id]
+                # Convert to Game object
+                game = Game.model_validate(game_data)
                 # Create Game with recommendation metadata
                 game_with_rec = game.model_copy(update={
                     'recommendation_score': rec["recommendation_score"],
                     'recommended_by_count': rec["recommended_by_count"]
                 })
                 recommendations_with_details.append(game_with_rec.model_dump())
+                recommendations_with_details.sort(key=lambda x: x.get('recommendation_score', 0), reverse=True)
         
         return {
             "success": True,

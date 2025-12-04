@@ -2,7 +2,7 @@
 Filtering service
 Business logic for game filtering and content appropriateness
 """
-from typing import List, Dict, Any, Optional, TYPE_CHECKING
+from typing import List, Dict, Any, Optional, Union, TYPE_CHECKING, cast
 from src.db.repositories.games_db import GamesRepository
 
 if TYPE_CHECKING:
@@ -225,12 +225,14 @@ class FilteringService:
         min_negative_reviews: Optional[int] = None,
         max_price: Optional[float] = None,
         limit: int = 1000,
-        order_by: str = 'positive'
-    ) -> List['Game']:
+        order_by: str = 'positive',
+        return_dict: bool = False
+    ) -> Union[List['Game'], Dict[int, 'Game']]:
         """
-        Get filtered games from database with content appropriateness check
+        Get filtered games using batch processing (ALWAYS uses batching for performance)
         
         Args:
+            game_ids: Optional list of specific game IDs to fetch. If None, fetches all matching filters.
             steam_genres: Filter by Steam genres
             languages: Filter by supported languages
             steam_categories: Filter by Steam categories
@@ -241,15 +243,17 @@ class FilteringService:
             min_positive_reviews: Minimum positive review count
             min_negative_reviews: Minimum negative review count
             max_price: Maximum price in USD
-            limit: Maximum number of games to return
+            limit: Maximum number of games to return (ignored if return_dict=True)
             order_by: Column to order by
+            return_dict: If True, return Dict[int, Game]. If False, return List[Game]
             
         Returns:
-            List of Game objects with full details
+            List[Game] or Dict[int, Game] depending on return_dict parameter
         """
         from src.schemas.game_schema import Game
         
-        # Fetch games from repository (returns Game objects)
+        # Use batch processing with find_by_filters_batch
+        print("DEBUG: Using batch processing for filtering games")
         games = self.games_repo.find_by_filters(
             genres=steam_genres,
             tags=tags,
@@ -260,88 +264,13 @@ class FilteringService:
             max_price=max_price,
             min_positive=min_positive_reviews,
             min_negative=min_negative_reviews,
-            limit=limit * 2 if limit else 2000,  # Fetch extra to account for filtering
-            order_by=order_by,
-            ascending=False
-        )
-        
-        # Apply content filtering
-        filtered_games = []
-        for game in games:
-            # Build game data structure for content check
-            game_data = {
-                'name': game.name,
-                'short_description': game.short_description or '',
-                'content_descriptors': game.content or {},
-                'content': game.content or {},
-                'required_age': game.required_age or 0,
-                'tags': game.tags,
-                'categories': game.categories,
-                'genres': game.genres
-            }
-            
-            if not self.is_content_appropriate(game_data):
-                continue
-            
-            # Apply additional filters (release date, etc.)
-            if min_release_date and game.release_date and game.release_date < min_release_date:
-                continue
-            if max_release_date and game.release_date and game.release_date > max_release_date:
-                continue
-            
-            filtered_games.append(game)
-            
-            if len(filtered_games) >= limit:
-                break
-        
-        return filtered_games
-    
-    async def get_filtered_games_batch(
-        self,
-        game_ids: List[int],
-        steam_genres: Optional[List[str]] = None,
-        languages: Optional[List[str]] = None,
-        steam_categories: Optional[List[str]] = None,
-        tags: Optional[List[str]] = None,
-        platforms: Optional[List[str]] = None,
-        min_release_date: Optional[str] = None,
-        max_release_date: Optional[str] = None,
-        min_positive_reviews: Optional[int] = None,
-        min_negative_reviews: Optional[int] = None,
-        max_price: Optional[float] = None
-    ) -> Dict[int, 'Game']:
-        """
-        Get specific games by IDs with filtering applied
-        
-        Args:
-            game_ids: List of Steam app IDs to fetch
-            (other args same as get_filtered_games)
-            
-        Returns:
-            Dictionary mapping game_id -> Game object
-        """
-        from src.schemas.game_schema import Game
-        
-        if not game_ids:
-            return {}
-        
-        # Fetch from repository (returns Game objects)
-        games = self.games_repo.find_by_filters_batch(
-            batch_ids=game_ids,
-            genres=steam_genres,
-            tags=tags,
-            categories=steam_categories,
-            languages=languages,
-            platforms=platforms,
-            min_price=None,
-            max_price=max_price,
-            min_positive=min_positive_reviews,
-            min_negative=min_negative_reviews,
-            order_by='positive'
+            order_by=order_by
         )
         
         # Apply content filtering and additional filters
+        filtered_games = []
         filtered_dict = {}
+        
         for game in games:
             # Build game data for content check
             game_data = {
@@ -368,6 +297,12 @@ class FilteringService:
             if min_negative_reviews and game.negative is not None and game.negative < min_negative_reviews:
                 continue
             
-            filtered_dict[game.game_id] = game
+            if return_dict:
+                filtered_dict[game.game_id] = game
+            else:
+                filtered_games.append(game)
+                if len(filtered_games) >= limit:
+                    break
         
-        return filtered_dict
+        return filtered_dict if return_dict else filtered_games
+    
