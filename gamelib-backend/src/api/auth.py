@@ -4,7 +4,8 @@ from fastapi.responses import RedirectResponse
 from urllib.parse import urlencode
 import httpx
 import re
-from src.api.users import user_login
+from src.db.repositories.users_db import UsersRepository
+from src.schemas.user_schema import fetch_steam_profile 
 
 router = APIRouter()
 
@@ -99,7 +100,11 @@ async def steam_callback(request: Request):
         return RedirectResponse(url=f"http://localhost:3000/login?error={error_msg}")
     
     # Redirect to dashboard with Steam ID
-    await user_login(int(steam_id))  # Ensure user is logged in / created in the system
+    # Ensure user is logged in / created in the system
+    profile_data = await fetch_steam_profile(int(steam_id))
+    if profile_data:
+        await UsersRepository.user_login(int(steam_id), profile_data)
+    
     dashboard_url = f"http://localhost:3000/dashboard?steam_id={steam_id}"
     print(f"Redirecting to dashboard: {dashboard_url}")
     return RedirectResponse(url=dashboard_url)

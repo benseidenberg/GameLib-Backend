@@ -27,6 +27,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+*.pkl
 
 # Virtual Environment
 *venv/
@@ -46,6 +47,7 @@ wheels/
 *.db
 *.sqlite3
 *.sqlite
+*.csv
 
 # Logs
 *.log
