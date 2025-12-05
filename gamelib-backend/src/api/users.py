@@ -157,18 +157,19 @@ async def delete_user(steam_id: int):
 @router.get("/users/{steam_id}/name")
 async def get_user_name(steam_id: int):
     """
-    Get just the user's Steam name - simplified endpoint for frontend
+    Get just the user's Steam name and avatar - simplified endpoint for frontend
     If user doesn't exist in database, triggers login process to create them
     """
     try:
-        # First try to get from database
+        # First try to get from database using find_by_steam_id
         user_data = UsersRepository.find_by_steam_id(steam_id)
         
         if user_data:
-            # User exists in database, get name from stored data
+            # User exists in database, get name and avatar from stored data
             player_name = user_data.persona_name
-            print(f"Found user in database, player_name: {player_name}")
-            return {"name": player_name}
+            player_avatar = user_data.avatar
+            print(f"Found user in database, player_name: {player_name}, avatar: {player_avatar}")
+            return {"name": player_name, "avatar": player_avatar}
         else:
             # User doesn't exist, fetch from Steam and create
             print(f"User {steam_id} not found, creating...")
@@ -182,8 +183,9 @@ async def get_user_name(steam_id: int):
             
             if login_result:
                 player_name = login_result.get('data', {}).get('personaname', 'Unknown Player')
-                print(f"Created user successfully, player_name: {player_name}")
-                return {"name": player_name}
+                player_avatar = login_result.get('data', {}).get('avatarfull') or login_result.get('data', {}).get('avatar', '')
+                print(f"Created user successfully, player_name: {player_name}, avatar: {player_avatar}")
+                return {"name": player_name, "avatar": player_avatar}
             else:
                 raise HTTPException(status_code=500, detail="Failed to create user")
                 

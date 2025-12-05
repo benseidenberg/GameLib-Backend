@@ -35,6 +35,9 @@ uvicorn src.main:app --host 0.0.0.0 --port 8000
 **Windows PowerShell:**
 ```powershell
 $env:RECALCULATE_AI="true"; uvicorn src.main:app --host 0.0.0.0 --port 8000
+
+$env:RECALCULATE_AI="false"; uvicorn src.main:app --host 0.0.0.0 --port 8000
+
 ```
 
 **Windows CMD:**

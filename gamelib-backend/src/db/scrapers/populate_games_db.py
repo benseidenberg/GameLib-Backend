@@ -528,6 +528,18 @@ async def process_game_batch(games: List[Dict[str, Any]], batch_number: int, exi
         if formatted_data:
             # Track new tags from this game
             game_tags = formatted_data.get('tags', [])
+            date = formatted_data.get('release_date')
+            positive = formatted_data.get('positive', 0)
+            name = formatted_data.get('name', 'Unknown Game').lower()
+            short_desc = formatted_data.get('short_desc', '')
+            if short_desc:
+                short_desc = short_desc.strip().lower()
+            else:
+                short_desc = ''
+            if any(word in name or word in short_desc for word in ["hentai", "adult", "nudity", "sexual content", "explicit"]) \
+            or (game_tags == [] and date == None and positive == 0):
+                print(f"  ⚠️  Warning: Skipping game {name} due to adult content or insufficient data")
+                continue
             for tag in game_tags:
                 if tag and tag not in existing_tags and tag not in new_tags_in_batch:
                     new_tags_in_batch.add(tag)
