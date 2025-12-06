@@ -3,10 +3,30 @@ Filtering service
 Business logic for game filtering and content appropriateness
 """
 from typing import List, Dict, Any, Optional, Union, TYPE_CHECKING, cast
+from pathlib import Path
 from src.db.repositories.games_db import GamesRepository
 
 if TYPE_CHECKING:
     from src.schemas.game_schema import Game
+
+
+TAG_FILE = Path(__file__).resolve().parent.parent / "db" / "scrapers" / "tags.txt"
+
+
+def _load_available_tags() -> List[str]:
+    """Load and sanitize tags from tags.txt (unique, trimmed, order preserved)."""
+    if not TAG_FILE.exists():
+        return []
+
+    raw = TAG_FILE.read_text(encoding="utf-8")
+    seen = set()
+    tags: List[str] = []
+    for part in raw.split(','):
+        tag = part.strip()
+        if tag and tag not in seen:
+            seen.add(tag)
+            tags.append(tag)
+    return tags
 
 
 class FilteringService:
@@ -15,47 +35,8 @@ class FilteringService:
     def __init__(self):
         self.games_repo = GamesRepository()
     
-    # Available tags for filtering (replaces tags.txt)
-    AVAILABLE_TAGS = [
-        "Action", "Adventure", "RPG", "Strategy", "Simulation", "Casual",
-        "Singleplayer", "Multiplayer", "Co-op", "Story Rich", "Open World",
-        "First-Person", "Third Person", "Shooter", "Puzzle", "Horror", "Survival",
-        "Atmospheric", "Exploration", "Sandbox", "Platformer", "Fantasy", "Sci-fi",
-        "Medieval", "Historical", "FPS", "Turn-Based", "Real-Time", "Tower Defense",
-        "Card Game", "Board Game", "Racing", "Sports", "Fighting", "Stealth",
-        "Tactical", "Roguelike", "Roguelite", "Metroidvania", "Souls-like",
-        "Point & Click", "Visual Novel", "Interactive Fiction", "Dating Sim",
-        "Management", "Building", "City Builder", "Colony Sim", "Crafting",
-        "Survival Horror", "Psychological Horror", "Gore", "Violent", "Dark",
-        "Comedy", "Funny", "Cartoon", "Anime", "Pixel Graphics", "Retro",
-        "Low Poly", "Hand-drawn", "2D", "3D", "VR", "Controller", "Keyboard",
-        "Mouse", "Touch", "Local Co-Op", "Online Co-Op", "Local Multiplayer",
-        "Online Multiplayer", "Cross-Platform Multiplayer", "PvP", "PvE",
-        "Competitive", "Team-Based", "Class-Based", "Hero Shooter", "MOBA",
-        "Battle Royale", "MMO", "MMORPG", "Massively Multiplayer", "Persistent World",
-        "Open World Survival Craft", "Base Building", "Resource Management",
-        "Economy", "Trading", "Loot", "Character Customization", "Character Action",
-        "Hack and Slash", "Bullet Hell", "Shoot 'Em Up", "Twin Stick Shooter",
-        "Top-Down", "Isometric", "Side Scroller", "Beat 'em up", "Arcade",
-        "Score Attack", "Time Attack", "Difficult", "Relaxing", "Great Soundtrack",
-        "Soundtrack", "Music", "Rhythm", "Musical", "Education", "Tutorial",
-        "Mature", "Nudity", "Sexual Content", "NSFW", "Adult", "Realistic",
-        "Stylized", "Abstract", "Minimalist", "Colorful", "Dark Fantasy", "Space",
-        "Post-apocalyptic", "Dystopian", "Cyberpunk", "Steampunk", "Magic",
-        "Dragons", "Demons", "Zombies", "Vampires", "Pirates", "Ninjas", "Robots",
-        "Mechs", "Dinosaurs", "Western", "Crime", "Detective", "Mystery", "Thriller",
-        "War", "Military", "World War I", "World War II", "Modern Warfare",
-        "Futuristic", "Time Travel", "Alternate History", "Choose Your Own Adventure",
-        "Multiple Endings", "Choices Matter", "Narrative", "Cinematic", "Quick-Time Events",
-        "Inventory Management", "Perma Death", "Procedural Generation", "Dynamic Narration",
-        "Moddable", "Level Editor", "User-Generated Content", "Workshop", "Achievements",
-        "Trading Cards", "Cloud Saves", "Partial Controller Support", "Full Controller Support",
-        "Steam Achievements", "Steam Cloud", "Steam Workshop", "Steam Trading Cards",
-        "In-App Purchases", "DLC", "Episodic", "Early Access", "Free to Play",
-        "Indie", "AAA", "Short", "Long", "Replay Value", "Family Friendly",
-        "Physics", "Destruction", "Environmental", "Parkour", "Transhumanism",
-        "Political", "Satire", "Parody", "Experimental", "Surreal", "Text-Based"
-    ]
+    # Available tags for filtering (loaded from tags.txt)
+    AVAILABLE_TAGS = _load_available_tags()
     
     # Content descriptor IDs for adult/inappropriate content
     ADULT_CONTENT_DESCRIPTORS = [3, 4]  # Mature Sexual Content, Nudity or Sexual Content

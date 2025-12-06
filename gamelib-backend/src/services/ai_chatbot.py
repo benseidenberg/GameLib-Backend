@@ -6,13 +6,13 @@ import os
 import pickle
 import openai
 import pandas as pd
+import ast
 from typing import Dict, Any, List, Optional, Union, Type
 import re
 import json
 from pathlib import Path
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from datasets import load_dataset
 from fastapi import HTTPException
 from src.services.filtering import FilteringService
 
@@ -29,6 +29,7 @@ SERVICES_DIR = Path(__file__).parent
 VECTORIZER_PATH = SERVICES_DIR / "tfidf_vectorizer.pkl"
 MATRIX_PATH = SERVICES_DIR / "tfidf_matrix.pkl"
 DATASET_PATH = SERVICES_DIR / "steam_dataset.pkl"
+GAMES_CSV_PATH = SERVICES_DIR.parent / "db" / "repositories" / "games_db.csv"
 
 # Global variables to cache the dataset and TF-IDF vectors
 _steam_dataset = None
@@ -38,9 +39,28 @@ _tfidf_matrix = None
 _vectors_initialized = False
 
 
+def _safe_literal_eval(value):
+    """Safely convert stringified dict/list values to Python objects."""
+    if pd.isna(value):
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return ast.literal_eval(str(value))
+    except Exception:
+        return None
+
+
+def _split_pipe_separated(value: Any) -> List[str]:
+    """Split pipe-separated strings into a clean list."""
+    if pd.isna(value) or value is None:
+        return []
+    return [part.strip() for part in str(value).split('|') if part and str(part).strip()]
+
+
 async def load_steam_dataset() -> Optional[pd.DataFrame]:
     """
-    Load the Steam games dataset from Hugging Face (with caching)
+    Load the Steam games dataset from the local games_db.csv (with caching)
     """
     global _steam_dataset, _dataset_loaded
     
@@ -50,131 +70,86 @@ async def load_steam_dataset() -> Optional[pd.DataFrame]:
         return _steam_dataset
     
     try:
-        print("DEBUG: Loading Steam games dataset from Hugging Face...")
-        # Load the Steam games dataset
-        dataset = load_dataset("FronkonGames/steam-games-dataset", split="train")
-        
-        # Convert to pandas DataFrame for easier manipulation
-        from datasets import Dataset as HFDataset
-        if isinstance(dataset, HFDataset):
-            _steam_dataset = pd.DataFrame(dataset)  # type: ignore
+        if not GAMES_CSV_PATH.exists():
+            raise HTTPException(status_code=500, detail=f"Local games_db.csv not found at {GAMES_CSV_PATH}")
+
+        print(f"DEBUG: Loading Steam games dataset from {GAMES_CSV_PATH}...")
+        df = pd.read_csv(GAMES_CSV_PATH)
+
+        if df.empty:
+            raise HTTPException(status_code=500, detail="Local games_db.csv is empty")
+
+        # Ensure expected columns exist
+        for required_col in ['platforms', 'metacritic', 'content', 'short_desc', 'price', 'genres', 'tags', 'categories', 'developers', 'publishers', 'languages']:
+            if required_col not in df.columns:
+                df[required_col] = ''
+
+        # Normalize structured columns
+        df['platforms_dict'] = df['platforms'].apply(_safe_literal_eval)
+        df['metacritic_dict'] = df['metacritic'].apply(_safe_literal_eval)
+        df['content_dict'] = df['content'].apply(_safe_literal_eval)
+
+        # Extract common fields from nested data
+        df['metacritic_score'] = df['metacritic_dict'].apply(lambda x: x.get('score') if isinstance(x, dict) else None)
+
+        # Split pipe-separated list fields
+        df['genres_list'] = df['genres'].apply(_split_pipe_separated)
+        df['tags_list'] = df['tags'].apply(_split_pipe_separated)
+        df['categories_list'] = df['categories'].apply(_split_pipe_separated)
+        df['developers_list'] = df['developers'].apply(_split_pipe_separated)
+        df['publishers_list'] = df['publishers'].apply(_split_pipe_separated)
+        df['languages_list'] = df['languages'].apply(_split_pipe_separated)
+
+        # Ensure numeric columns are proper types
+        df['game_id'] = pd.to_numeric(df['game_id'], errors='coerce').fillna(0).astype(int)
+        if 'price_usd' not in df.columns:
+            df['price_usd'] = 0.0
+        df['price_usd'] = pd.to_numeric(df['price_usd'], errors='coerce').fillna(0.0)
+        df['positive'] = pd.to_numeric(df['positive'], errors='coerce').fillna(0).astype(int)
+        df['negative'] = pd.to_numeric(df['negative'], errors='coerce').fillna(0).astype(int)
+        if 'required_age' not in df.columns:
+            df['required_age'] = 0
+        df['required_age'] = pd.to_numeric(df['required_age'], errors='coerce').fillna(0).astype(int)
+
+        # Normalize booleans
+        if 'is_free' in df.columns:
+            df['is_free'] = df['is_free'].astype(bool)
         else:
-            _steam_dataset = pd.DataFrame(dataset)  # type: ignore
-        
-        print(f"DEBUG: Dataset columns: {list(_steam_dataset.columns)}")
-        print(f"DEBUG: Dataset shape: {_steam_dataset.shape}")
-        
-        # Check what columns are actually available and handle them safely
-        available_columns = list(_steam_dataset.columns)
-        
-        # Common column name variations to check for
-        name_columns = ['name', 'title', 'game_name', 'app_name', 'Name', 'Title']
-        desc_columns = ['description', 'short_description', 'detailed_description', 'about_the_game', 
-                       'Description', 'Short_description', 'About', 'About the game']
-        
-        # Find the actual name column
-        name_col = None
-        for col in name_columns:
-            if col in available_columns:
-                name_col = col
-                break
-        
-        # Find the actual description column  
-        desc_col = None
-        for col in desc_columns:
-            if col in available_columns:
-                desc_col = col
-                break
-        
-        print(f"DEBUG: Using name column: {name_col}")
-        print(f"DEBUG: Using description column: {desc_col}")
-        
-        # Filter for English language games only
-        language_columns = ['Supported languages', 'Languages', 'languages', 'Language', 'language']
-        language_col = None
-        for col in language_columns:
-            if col in available_columns:
-                language_col = col
-                break
-        
-        if language_col:
-            print(f"DEBUG: Using language column: {language_col}")
-            original_count = len(_steam_dataset)
-            
-            # Filter for games that support English
-            # Check for 'English' in the language field (case insensitive)
-            english_mask = _steam_dataset[language_col].astype(str).str.lower().str.contains(
-                'english', case=False, na=False
-            )
-            _steam_dataset = _steam_dataset[english_mask]
-            
-            filtered_count = len(_steam_dataset)
-            print(f"DEBUG: Language filtering: {original_count} -> {filtered_count} games ({original_count - filtered_count} non-English games filtered out)")
-        else:
-            print("DEBUG: No language column found, skipping language filtering")
-        
-        # Only filter out rows if we found the columns
-        if name_col and desc_col:
-            # Remove games without descriptions or names
-            _steam_dataset = _steam_dataset.dropna(subset=[desc_col, name_col])
-            print(f"DEBUG: After filtering: {len(_steam_dataset)} games remain")
-        elif name_col:
-            # If we only have name column, filter by that
-            _steam_dataset = _steam_dataset.dropna(subset=[name_col])
-            print(f"DEBUG: After filtering by name only: {len(_steam_dataset)} games remain")
-        else:
-            print("DEBUG: No standard name/description columns found, using dataset as-is")
-        
-        # Create a combined text field for similarity matching using available columns
-        text_parts = []
-        
-        if name_col:
-            text_parts.append(_steam_dataset[name_col].astype(str))
-        
-        if desc_col:
-            text_parts.append(_steam_dataset[desc_col].astype(str))
-        
-        # Look for other useful columns
-        other_useful_cols = ['genres', 'tags', 'categories', 'Genres', 'Tags', 'Categories']
-        for col in other_useful_cols:
-            if col in available_columns:
-                text_parts.append(_steam_dataset[col].astype(str))
-                print(f"DEBUG: Including {col} in combined text")
-        
-        if text_parts:
-            # Properly concatenate pandas Series with spaces
-            _steam_dataset['combined_text'] = text_parts[0]
-            for i in range(1, len(text_parts)):
-                _steam_dataset['combined_text'] = _steam_dataset['combined_text'].astype(str) + " " + text_parts[i].astype(str)
-        else:
-            # Fallback: use all string columns
-            print("DEBUG: Using all string columns for combined text")
-            string_cols = _steam_dataset.select_dtypes(include=['object']).columns
-            if len(string_cols) > 0:
-                _steam_dataset['combined_text'] = _steam_dataset[string_cols].fillna('').astype(str).agg(' '.join, axis=1)
-            else:
-                _steam_dataset['combined_text'] = 'game'  # Ultimate fallback
-        
-        # Mark as loaded ONLY after successful processing
+            df['is_free'] = False
+
+        # Derive steam_appid for consistency with previous code
+        df['steam_appid'] = df['game_id']
+
+        # Build combined text for vectorization
+        name_series = df['name'].fillna('').astype(str)
+        desc_series = df['short_desc'].fillna('').astype(str)
+        genres_series = df['genres_list'].apply(lambda vals: ' '.join(vals))
+        tags_series = df['tags_list'].apply(lambda vals: ' '.join(vals))
+        categories_series = df['categories_list'].apply(lambda vals: ' '.join(vals))
+
+        combined = name_series.str.cat(desc_series, sep=" ")
+        combined = combined.str.cat(genres_series, sep=" ")
+        combined = combined.str.cat(tags_series, sep=" ")
+        combined = combined.str.cat(categories_series, sep=" ")
+        df['combined_text'] = combined.str.strip()
+
+        _steam_dataset = df
         _dataset_loaded = True
-        print(f"DEBUG: Successfully loaded and cached {len(_steam_dataset)} games from dataset")
-        
-        # Show a sample of the data for debugging (only on first load)
+
+        print(f"DEBUG: Successfully loaded and cached {len(_steam_dataset)} games from local CSV")
+
         if len(_steam_dataset) > 0:
-            sample_game = _steam_dataset.iloc[0]
-            print(f"DEBUG: Sample game: {dict(sample_game.head(5))}")  # Show first 5 fields only
-        
+            sample = _steam_dataset.iloc[0][['game_id', 'name', 'price', 'positive', 'negative']]
+            print(f"DEBUG: Sample game summary: {sample.to_dict()}")
+
         return _steam_dataset
-        
+
     except Exception as e:
         print(f"DEBUG: Error loading Steam dataset: {str(e)}")
         import traceback
         print(f"DEBUG: Full traceback: {traceback.format_exc()}")
-        
-        # Reset cache state on error
         _dataset_loaded = False
         _steam_dataset = None
-        
         raise HTTPException(status_code=500, detail=f"Error loading game dataset: {str(e)}")
 
 
@@ -335,7 +310,7 @@ def get_dataset_status() -> Dict[str, Any]:
 
 async def reload_dataset():
     """
-    Force reload the dataset from Hugging Face and reinitialize TF-IDF vectors.
+    Force reload the local dataset and reinitialize TF-IDF vectors.
     This invalidates all caches and recomputes everything.
     """
     global _steam_dataset, _dataset_loaded, _tfidf_vectorizer, _tfidf_matrix, _vectors_initialized
@@ -646,8 +621,8 @@ def calculate_game_score(game, similarity_score: float, popularity_pref: str) ->
     score = similarity_score * 100  # Convert to 0-100 scale
     
     # Get ratings data
-    positive = int(safe_convert_value(game.get('Positive', 0), int, 0) or 0)
-    negative = int(safe_convert_value(game.get('Negative', 0), int, 0) or 0)
+    positive = int(safe_convert_value(game.get('positive', game.get('Positive', 0)), int, 0) or 0)
+    negative = int(safe_convert_value(game.get('negative', game.get('Negative', 0)), int, 0) or 0)
     total_reviews = positive + negative
     
     # Calculate rating percentage
@@ -778,12 +753,12 @@ async def find_similar_games(
                 continue
                 
             game = dataset.iloc[idx]
+            steam_appid_raw: Any = game.get('steam_appid', game.get('game_id'))
             
             # Check ownership first
-            steam_appid = game.get('AppID', game.get('steam_appid', game.get('appid', game.get('app_id', None))))
-            if owned_games and steam_appid:
+            if owned_games and steam_appid_raw:
                 try:
-                    steam_appid_int = int(steam_appid)
+                    steam_appid_int = int(steam_appid_raw)
                     if steam_appid_int in owned_games:
                         continue
                 except (ValueError, TypeError):
@@ -818,52 +793,64 @@ async def find_similar_games(
             checked_count += 1
             game = candidate['game']
             similarity_score = candidate['similarity']
+            steam_appid_raw: Any = game.get('steam_appid', game.get('game_id'))
             
             # Extract game information
+            steam_appid_value = int(safe_convert_value(steam_appid_raw, int, 0) or 0)
+
             game_info = {
-                "name": safe_convert_value(game.get('Name', game.get('name', 'Unknown')), str, 'Unknown'),
-                "description": safe_convert_value(game.get('About the game', game.get('description', '')), str, ''),
-                "genres": parse_comma_separated_string(game.get('Genres', game.get('genres', ''))),
-                "tags": parse_comma_separated_string(game.get('Tags', game.get('tags', ''))),
-                "categories": parse_comma_separated_string(game.get('Categories', game.get('categories', ''))),
+                "name": safe_convert_value(game.get('name', 'Unknown'), str, 'Unknown'),
+                "description": safe_convert_value(game.get('short_desc', ''), str, ''),
+                "genres": game.get('genres_list', []),
+                "tags": game.get('tags_list', []),
+                "categories": game.get('categories_list', []),
                 "similarity_score": float(similarity_score),
                 "total_score": candidate['total_score'],
-                "price": safe_convert_value(game.get('Price', game.get('price', 'N/A')), str, 'N/A'),
-                "steam_appid": int(safe_convert_value(game.get('AppID', game.get('steam_appid')), int, 0) or 0) if game.get('AppID') or game.get('steam_appid') else None,
-                "developers": parse_comma_separated_string(game.get('Developers', game.get('developers', ''))),
-                "publishers": parse_comma_separated_string(game.get('Publishers', game.get('publishers', ''))),
-                "release_date": safe_convert_value(game.get('Release date', game.get('release_date', '')), str, ''),
-                "metacritic_score": int(safe_convert_value(game.get('Metacritic score'), int, 0) or 0) if game.get('Metacritic score') else None,
-                "user_score": float(safe_convert_value(game.get('User score'), float, 0.0) or 0.0) if game.get('User score') else None,
-                "estimated_owners": safe_convert_value(game.get('Estimated owners'), str, ''),
-                "required_age": int(safe_convert_value(game.get('Required age'), int, 0) or 0),
-                "positive_ratings": int(safe_convert_value(game.get('Positive'), int, 0) or 0),
-                "negative_ratings": int(safe_convert_value(game.get('Negative'), int, 0) or 0)
+                "price": safe_convert_value(game.get('price', 'N/A'), str, 'N/A'),
+                "price_usd": float(safe_convert_value(game.get('price_usd', 0.0), float, 0.0) or 0.0),
+                "steam_appid": steam_appid_value if steam_appid_value else None,
+                "developers": game.get('developers_list', []),
+                "publishers": game.get('publishers_list', []),
+                "release_date": safe_convert_value(game.get('release_date', ''), str, ''),
+                "metacritic_score": safe_convert_value(game.get('metacritic_score', None), int, None),
+                "required_age": int(safe_convert_value(game.get('required_age', 0), int, 0) or 0),
+                "positive_ratings": int(safe_convert_value(game.get('positive', 0), int, 0) or 0),
+                "negative_ratings": int(safe_convert_value(game.get('negative', 0), int, 0) or 0),
+                "steam_url": safe_convert_value(game.get('steam_url', ''), str, ''),
+                "image": safe_convert_value(game.get('image', ''), str, ''),
+                "is_free": bool(game.get('is_free', False)),
+                "platforms": game.get('platforms_dict', {}),
+                "languages": game.get('languages_list', []),
+                "content": game.get('content_dict', {}),
             }
             
             # Apply price filtering
             if price_info.get("free_only"):
-                price_str = str(game.get('Price', game.get('price', ''))).lower()
-                if 'free' not in price_str and '0' not in price_str:
+                price_val = float(safe_convert_value(game.get('price_usd', 0.0), float, 0.0) or 0.0)
+                price_str = str(game.get('price', '')).lower()
+                if not game_info['is_free'] and price_val > 0 and 'free' not in price_str:
                     continue
             
             if price_info.get("max_price"):
-                price_str = str(game.get('Price', game.get('price', '')))
-                price_match = re.search(r'\$?(\d+\.?\d*)', price_str)
-                if price_match:
-                    try:
-                        price_value = float(price_match.group(1))
-                        if price_value > price_info["max_price"]:
-                            continue
-                    except ValueError:
-                        pass
+                price_val = float(safe_convert_value(game.get('price_usd', None), float, 0.0) or 0.0)
+                if price_val and price_val > price_info["max_price"]:
+                    continue
+                if not price_val:
+                    price_str = str(game.get('price', '')).lower()
+                    match = re.search(r'\$?(\d+\.?\d*)', price_str)
+                    if match:
+                        try:
+                            if float(match.group(1)) > price_info["max_price"]:
+                                continue
+                        except ValueError:
+                            pass
             
             # Apply content appropriateness filtering
             game_content_data = {
                 'name': game_info['name'],
                 'short_description': game_info['description'],
-                'content_descriptors': {},
-                'content': {},
+                'content_descriptors': game.get('content_dict', {}),
+                'content': game.get('content_dict', {}),
                 'required_age': game_info['required_age'],
                 'tags': game_info['tags'],
                 'categories': game_info['categories'],
