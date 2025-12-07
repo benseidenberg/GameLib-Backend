@@ -67,13 +67,3 @@ Thumbs.db
 *.pid
 instance/
 .webassets-cache
-
-# Other
-.jpg
-.png
-.gif
-.bmp
-.zip
-.tar.gz
-.rar
-.jar

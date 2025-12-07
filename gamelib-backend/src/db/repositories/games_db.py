@@ -266,7 +266,7 @@ class GamesRepository:
         min_negative: Optional[int] = None,
         order_by: str = 'positive',
         ascending: bool = False,
-        batch_size: int = 50,
+        batch_size: int = 75,
         stop_limit: Optional[int] = None,
         apply_content_filter: bool = True,
     ) -> List['Game']:
