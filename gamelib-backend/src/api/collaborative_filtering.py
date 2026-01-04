@@ -2,12 +2,15 @@
 Collaborative Filtering API Routes
 HTTP endpoints for collaborative filtering recommendations
 """
+from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query
 from typing import Dict, Optional, List, cast
 from src.services.collaborative_recommendations import CollaborativeRecommendationService
 from src.services.filtering import FilteringService
+from src.services.rf_model import RandomForestScorer, MODEL_DIR
 from src.schemas.game_schema import Game
 from src.db.repositories.games_db import GamesRepository
+from src.db.repositories.users_db import UsersRepository
 import httpx
 
 router = APIRouter()
@@ -15,6 +18,18 @@ router = APIRouter()
 # Initialize services
 collab_service = CollaborativeRecommendationService()
 filtering_service = FilteringService()
+
+# Global RF model (lazy-loaded on first request)
+_global_rf_scorer: Optional[RandomForestScorer] = None
+
+def get_global_rf_scorer() -> RandomForestScorer:
+    """Lazy-load the global RF model."""
+    global _global_rf_scorer
+    if _global_rf_scorer is None:
+        _global_rf_scorer = RandomForestScorer(model_path=MODEL_DIR / "rf_model_global.pkl")
+        if not _global_rf_scorer.is_trained:
+            print("WARNING: Global RF model not found. Train it by running: python src/services/rf_model.py")
+    return _global_rf_scorer
 
 
 @router.get("/tags")
@@ -85,7 +100,7 @@ async def get_collaborative_filtering_recommendations(
             top_n_games=top_n_games or 5,
             min_playtime=min_playtime or 60,
             max_total_users=max_total_users or 1000,
-            max_recommendations=(max_recommendations * 3) if max_recommendations else 60  # Get extra for filtering
+            max_recommendations=(max_recommendations * 5) if max_recommendations else 100  # Get 5x for RF reranking
         )
         
         if "error" in result and result["error"]:
@@ -130,6 +145,9 @@ async def get_collaborative_filtering_recommendations(
         target_count = max_recommendations or 20
         
         # Step 2: Filter recommended games by game_ids + filters
+        # Get more games for RF reranking (5x target)
+        filter_limit = target_count * 5
+        
         # Content filtering happens in find_by_filters when filters are present
         print(f"DEBUG: Filtering {len(recommended_game_ids)} recommended games with filters")
         result_from_filter = await filtering_service.get_filtered_games(
@@ -144,7 +162,7 @@ async def get_collaborative_filtering_recommendations(
             min_positive_reviews=min_positive_reviews,
             min_negative_reviews=min_negative_reviews,
             max_price=max_price,
-            limit=target_count * 3,  # Get extra for sorting and limiting
+            limit=filter_limit,  # Get 5x for RF reranking
             return_dict=False,
             apply_content_filter=True  # Content filter in DB layer
         )
@@ -179,11 +197,11 @@ async def get_collaborative_filtering_recommendations(
             print(f"DEBUG: Filters applied - content already filtered, {len(filtered_games)} games")
             content_filtered_games = filtered_games
         
-        # Step 4: Backfill if we don't have enough games
-        target_count = max_recommendations or 20
-        if len(content_filtered_games) < target_count:
-            needed_count = target_count - len(content_filtered_games)
-            print(f"DEBUG: Need {needed_count} more games, fetching additional matches")
+        # Step 4: Backfill if we don't have enough games for RF reranking
+        filter_limit = target_count * 5
+        if len(content_filtered_games) < filter_limit:
+            needed_count = filter_limit - len(content_filtered_games)
+            print(f"DEBUG: Need {needed_count} more games for RF reranking, fetching additional matches")
             
             # Get already included game_ids to avoid duplicates
             existing_game_ids = {game.game_id for game in content_filtered_games}
@@ -214,7 +232,7 @@ async def get_collaborative_filtering_recommendations(
                 if game.game_id in existing_game_ids:
                     continue  # Skip duplicates
                 
-                if len(content_filtered_games) >= target_count:
+                if len(content_filtered_games) >= filter_limit:
                     break
                 
                 content_filtered_games.append(game)
@@ -238,19 +256,53 @@ async def get_collaborative_filtering_recommendations(
                     'recommended_by_count': 0
                 })
             final_recommendations.append(game_with_rec)
-        
+
         # Sort by recommended_by_count (number of users who play each game)
         final_recommendations.sort(key=lambda x: x.recommended_by_count or 0, reverse=True)
-        
-        # Limit to max_recommendations
-        final_recommendations = final_recommendations[:target_count]
-        
+
+        # Step 6: Rerank with global RF model (trained on all user data)
+        # Get 5x candidates, let RF model pick the best
+        print(f"DEBUG: Prepared {len(final_recommendations)} games for RF reranking (5x target of {target_count})")
+        rec_payload: List[Dict] = [game.model_dump() for game in final_recommendations]
+        rf_model_used = False
+        rf_model_info = {}
+        try:
+            rf_scorer = get_global_rf_scorer()
+            if rf_scorer.is_trained:
+                print(f"DEBUG: RF model reranking {len(rec_payload)} games...")
+                rec_payload = rf_scorer.rerank_recommendations(rec_payload)
+                rf_model_used = True
+                feature_dims = 0
+                try:
+                    if rf_scorer.feature_matrix is not None:
+                        feature_dims = rf_scorer.feature_matrix.shape[1]  # type: ignore
+                except (AttributeError, IndexError):
+                    pass
+                rf_model_info = {
+                    "model_used": True,
+                    "model_path": str(rf_scorer.model_path),
+                    "n_estimators": rf_scorer.n_estimators,
+                    "games_reranked": len(rec_payload),
+                    "feature_dimensions": feature_dims,
+                }
+                print(f"DEBUG: RF reranking complete. Top game: {rec_payload[0].get('name') if rec_payload else 'none'}")
+            else:
+                print("WARNING: Global RF model not trained, skipping rerank")
+                rf_model_info = {"model_used": False, "reason": "Model not trained"}
+        except Exception as rf_exc:
+            print(f"RF rerank skipped: {rf_exc}")
+            rf_model_info = {"model_used": False, "reason": str(rf_exc)}
+
+        # Limit to max_recommendations after reranking
+        rec_payload = rec_payload[:target_count]
+
         return {
             "success": True,
-            "recommendations": [game.model_dump() for game in final_recommendations],
+            "recommendations": rec_payload,
             "similar_users": result.get("similar_users", []),
             "user_top_games": result.get("user_top_games", []),
-            "total_users_analyzed": result.get("total_users_analyzed", 0)
+            "total_users_analyzed": result.get("total_users_analyzed", 0),
+            "rf_model_info": rf_model_info,
         }
         
     except Exception as e:

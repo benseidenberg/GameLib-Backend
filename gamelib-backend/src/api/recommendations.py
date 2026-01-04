@@ -12,11 +12,11 @@ from src.services.ai_chatbot import (
     generate_recommendation_explanation
 )
 from src.db.repositories.games_db import GamesRepository
+from src.db.repositories.users_db import UsersRepository
 from src.schemas.user_schema import User
+from src.schemas.game_schema import Game
 from src.db.supabase_client import supabase
 import os
-import httpx
-import asyncio
 from typing import Optional, List, Dict, Any
 import random
 
@@ -31,6 +31,10 @@ class AIRecommendationRequest(BaseModel):
     steam_id: Optional[int] = None  # Optional Steam ID to filter out owned games
 
 router = APIRouter()
+
+# Initialize services
+clusters_service = ClustersService()
+filtering_service = FilteringService()
 
 
 @router.get("/dataset/status")
@@ -47,157 +51,6 @@ async def reload_dataset():
     Force reload the dataset from Hugging Face
     """
     return await chatbot_reload_dataset()
-
-
-async def get_steam_app_details(app_id: int):
-    """
-    Fetch detailed game information from Steam API with content filtering
-    """
-    try:
-        url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&format=json"
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url)
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                # Steam API returns data with app_id as key
-                app_data = data.get(str(app_id))
-                if app_data and app_data.get('success') and 'data' in app_data:
-                    game_data = app_data['data']
-                    
-                    # Check if content is appropriate
-                    if not is_content_appropriate(game_data):
-                        print(f"DEBUG: Filtered out inappropriate content for app_id: {app_id}")
-                        return None
-                    
-                    # Extract relevant information
-                    game_info = {
-                        "app_id": app_id,
-                        "title": game_data.get('name', 'Unknown Game'),
-                        "description": game_data.get('short_description', ''),
-                        "image": game_data.get('header_image', ''),
-                        "price": game_data.get('price_overview', {}).get('final_formatted', 'Free'),
-                        "genres": [genre.get('description', '') for genre in game_data.get('genres', [])],
-                        "categories": [cat.get('description', '') for cat in game_data.get('categories', [])],
-                        "developers": game_data.get('developers', []),
-                        "publishers": game_data.get('publishers', []),
-                        "release_date": game_data.get('release_date', {}).get('date', ''),
-                        "steam_url": f"https://store.steampowered.com/app/{app_id}/"
-                    }
-                    
-                    return game_info
-                else:
-                    return None
-            else:
-                return None
-                
-    except Exception as e:
-        print(f"DEBUG: Error fetching Steam app details for {app_id}: {str(e)}")
-        return None
-
-
-def is_content_appropriate(game_data):
-    """
-    Check if game content is appropriate (filters out sexual/adult content)
-    """
-    try:
-        # Check content descriptors for adult content
-        content_descriptors = game_data.get('content_descriptors', {})
-        if content_descriptors:
-            descriptor_ids = content_descriptors.get('ids', [])
-            descriptor_notes = content_descriptors.get('notes') or ''
-            
-            # Steam's adult content descriptor IDs
-            adult_descriptor_ids = [3, 4]  # 3: Nudity/Sexual Content, 4: Adult Only Sexual Content
-            
-            if any(desc_id in adult_descriptor_ids for desc_id in descriptor_ids):
-                return False
-            
-            # Check descriptor notes for sexual content keywords
-            sexual_keywords = ['sexual', 'mature', 'adult', 'erotic', 'hentai']
-            if any(keyword in descriptor_notes.lower() for keyword in sexual_keywords):
-                return False
-        
-        # Check age ratings
-        required_age = game_data.get('required_age', 0)
-        try:
-            # Convert to int if it's a string
-            required_age_int = int(required_age) if required_age else 0
-            if required_age_int >= 18:
-                # Additional check for adult content categories
-                categories = game_data.get('categories', [])
-                for category in categories:
-                    cat_desc = (category.get('description') or '').lower()
-                    if 'adult only' in cat_desc or 'mature' in cat_desc:
-                        return False
-        except (ValueError, TypeError):
-            # If conversion fails, skip age-based filtering for this game
-            print(f"DEBUG: Could not convert required_age '{required_age}' to int, skipping age check")
-            pass
-        
-        # Check game name and description for inappropriate content
-        game_name = (game_data.get('name') or '').lower()
-        game_desc = (game_data.get('short_description') or '').lower()
-        
-        # List of inappropriate keywords
-        inappropriate_keywords = [
-            'hentai', 'porn', 'erotic', 'xxx', 'adult only', 'sexual',
-             'strip', 'mature content', 'adult content'
-        ]
-        
-        # Check if any inappropriate keywords are in the title or description
-        for keyword in inappropriate_keywords:
-            if keyword in game_name or keyword in game_desc:
-                return False
-        
-        # Check genres for adult content
-        genres = game_data.get('genres', [])
-        for genre in genres:
-            genre_desc = (genre.get('description') or '').lower()
-            if any(keyword in genre_desc for keyword in ['adult', 'sexual', 'mature']):
-                return False
-        
-        return True
-        
-    except Exception as e:
-        print(f"DEBUG: Error in content filtering: {str(e)}")
-        # If there's an error in filtering, err on the side of caution and allow the content
-        return True
-
-
-async def get_steam_app_details_basic(app_id: int):
-    """
-    Fetch basic game details (just title and app_id) for source games
-    """
-    try:
-        url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&format=json"
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url)
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                # Steam API returns data with app_id as key
-                app_data = data.get(str(app_id))
-                if app_data and app_data.get('success') and 'data' in app_data:
-                    game_data = app_data['data']
-                    
-                    return {
-                        "app_id": app_id,
-                        "title": game_data.get('name', 'Unknown Game')
-                    }
-            
-            return None
-            
-    except Exception as e:
-        print(f"DEBUG: Error fetching basic Steam app details for {app_id}: {str(e)}")
-        return None
-# Initialize services
-clusters_service = ClustersService()
-filtering_service = FilteringService()
 
 
 @router.get("/clusters/{steam_id}")
@@ -261,15 +114,16 @@ async def get_steam_player_summary(steam_id: int):
 
 
 @router.get("/steam/game-details/{game_id}")
-async def get_steam_game_details_endpoint(game_id: int):
+async def get_steam_game_details(game_id: int):
     """
-    Get detailed information about a specific Steam game
+    Get detailed information about a specific Steam game from database or Steam API
     """
     try:
         # Validate game_id
         if game_id <= 0 or game_id > 999999999:
             raise HTTPException(status_code=400, detail="Invalid Steam app ID")
         
+        # Use GamesRepository to fetch game details (checks DB first, then Steam API)
         game = await GamesRepository.fetch_details(game_id)
         
         if not game:
@@ -284,9 +138,10 @@ async def get_steam_game_details_endpoint(game_id: int):
         raise HTTPException(status_code=500, detail=f"Error fetching game details: {str(e)}")
 
 
-@router.get("/recommendations/clusters/{steam_id}")
+@router.get("/recommendations/clusters/{steam_id}") 
 async def get_cluster_recommendations(steam_id: int):
     """
+    OUTDATED - This endpoint is deprecated and may be removed in future versions.
     Get 5 cluster-based game recommendations with full details
     Uses Steam's clustering API to find games based on user's playtime patterns
     """
@@ -463,35 +318,6 @@ async def get_cluster_recommendations(steam_id: int):
         raise HTTPException(status_code=500, detail=f"Error getting test recommendations: {str(e)}")
 
 
-async def get_user_owned_games(steam_id: int) -> List[int]:
-    """
-    Get list of app IDs that the user already owns
-    """
-    try:
-        url = f"http://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?key={STEAM_API_KEY}&steamid={steam_id}&format=json&include_appinfo=1&include_played_free_games=1"
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url)
-            if response.status_code == 200:
-                data = response.json()
-                
-                if "response" in data and "games" in data["response"]:
-                    games = data["response"]["games"]
-                    owned_app_ids = [game.get("appid") for game in games if game.get("appid")]
-                    print(f"DEBUG: User {steam_id} owns {len(owned_app_ids)} games")
-                    return owned_app_ids
-                else:
-                    print(f"DEBUG: No games found for user {steam_id}")
-                    return []
-            else:
-                print(f"DEBUG: Error fetching owned games for {steam_id}: {response.status_code}")
-                return []
-                
-    except Exception as e:
-        print(f"DEBUG: Error getting owned games for {steam_id}: {str(e)}")
-        return []
-
-
 @router.post("/recommendations/ai")
 async def get_ai_recommendations(request: AIRecommendationRequest):
     """
@@ -510,8 +336,11 @@ async def get_ai_recommendations(request: AIRecommendationRequest):
         # Step 0: Get user's owned games if Steam ID is provided
         owned_games = []
         if request.steam_id:
-            owned_games = await get_user_owned_games(request.steam_id)
-            print(f"DEBUG: User owns {len(owned_games)} games, will filter them out")
+            profile_data = await User.fetch_profile_data(request.steam_id)
+            if profile_data and profile_data.get('games'):
+                # Extract game IDs from the profile data
+                owned_games = [int(game_id) for game_id in profile_data['games'].keys()]
+                print(f"DEBUG: User owns {len(owned_games)} games, will filter them out")
         
         # Step 1: Analyze the prompt with OpenAI
         ai_analysis = await analyze_prompt_with_ai(prompt)
@@ -524,34 +353,53 @@ async def get_ai_recommendations(request: AIRecommendationRequest):
         # Step 3: Find similar games using the dataset
         similar_games = await find_similar_games(ai_analysis, price_info, limit=5, owned_games=owned_games, original_prompt=prompt)
         
-        # Step 4: Enhance results with Steam API data if possible
+        # Step 4: Enhance results with game details from database
         enhanced_games = []
         for game in similar_games:
-            enhanced_game = game.copy()
+            # Game is already a Game object, convert to dict for response
+            enhanced_game = {
+                "name": game.name,
+                "description": game.short_description,
+                "genres": game.genres,
+                "tags": game.tags,
+                "categories": game.categories,
+                "similarity_score": game.recommendation_score,
+                "price": game.price,
+                "price_usd": game.price_usd,
+                "steam_appid": game.game_id,
+                "app_id": game.game_id,
+                "developers": game.developers,
+                "publishers": game.publishers,
+                "release_date": game.release_date,
+                "required_age": game.required_age,
+                "positive_ratings": game.positive,
+                "negative_ratings": game.negative,
+                "steam_url": game.steam_url,
+                "image": game.header_image,
+                "platforms": game.platforms,
+                "languages": game.languages,
+                "content": game.content
+            }
             
-            # Ensure steam_appid is always included in the response
-            enhanced_game["app_id"] = game.get('steam_appid', None)
-            
-            # Try to get additional info from Steam API if we have an app_id
-            steam_appid = game.get('steam_appid')
-            if steam_appid and str(steam_appid).isdigit():
+            # Try to get additional info from database if we have an app_id
+            if game.game_id:
                 try:
-                    steam_info = await get_steam_app_details(int(steam_appid))
-                    if steam_info:
-                        # Merge Steam API data with dataset data
+                    # Use GamesRepository to fetch full game details
+                    game_details = await GamesRepository.fetch_details(game.game_id)
+                    if game_details:
+                        # Merge database data with dataset data (database data takes precedence)
                         enhanced_game.update({
-                            "steam_title": steam_info.get("title"),
-                            "steam_description": steam_info.get("description"),
-                            "steam_image": steam_info.get("image"),
-                            "steam_price": steam_info.get("price"),
-                            "steam_genres": steam_info.get("genres", []),
-                            "steam_url": steam_info.get("steam_url"),
-                            "developers": steam_info.get("developers", []),
-                            "publishers": steam_info.get("publishers", []),
-                            "app_id": steam_appid  # Ensure app_id is set from Steam API too
+                            "steam_title": game_details.name,
+                            "steam_description": game_details.short_description,
+                            "steam_image": game_details.header_image,
+                            "steam_price": game_details.price,
+                            "steam_genres": game_details.genres,
+                            "steam_url": game_details.steam_url,
+                            "developers": game_details.developers,
+                            "publishers": game_details.publishers
                         })
                 except Exception as e:
-                    print(f"DEBUG: Error fetching Steam data for {steam_appid}: {str(e)}")
+                    print(f"DEBUG: Error fetching game details for {game.game_id}: {str(e)}")
             
             enhanced_games.append(enhanced_game)
         
